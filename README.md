@@ -1,6 +1,6 @@
 # Ralph Wiggum for Cursor
 
-An implementation of [Geoffrey Huntley's Ralph Wiggum technique](https://ghuntley.com/ralph/) for Cursor, enabling autonomous AI development with deliberate context management.
+An implementation of [Geoffrey Huntley's Ralph Wiggum technique](https://ghuntley.com/ralph/) for Cursor, enabling autonomous AI development with deliberate context management and stronger scaffolding for weaker, cheaper models.
 
 > "That's the beauty of Ralph - the technique is deterministically bad in an undeterministic world."
 
@@ -55,11 +55,12 @@ This creates two problems:
 │     ┌────────────────┴────────┴────────────────┐            │
 │     ▼                                           ▼            │
 │  .ralph/                                    Signals          │
-│  ├── activity.log  (tool calls)            ├── WARN at 70k  │
-│  ├── errors.log    (failures)              ├── ROTATE at 80k│
-│  ├── progress.md   (agent writes)          ├── COMPLETE     │
-│  ├── guardrails.md (lessons learned)       ├── GUTTER       │
-│  └── tasks.yaml    (cached task state)     └── DEFER        │
+│  ├── session-brief.md (restart brief)      ├── WARN at 170k │
+│  ├── activity.log     (tool calls)         ├── ROTATE at 200k│
+│  ├── errors.log       (failures)           ├── COMPLETE     │
+│  ├── progress.md      (compact live state) ├── GUTTER       │
+│  ├── guardrails.md    (lessons learned)    ├── DEFER        │
+│  └── tasks.yaml       (cached task state)  └── THRASH STOP  │
 │                                                              │
 │  When ROTATE → fresh context, continue from git             │
 │  When DEFER → exponential backoff, retry same task          │
@@ -68,13 +69,26 @@ This creates two problems:
 
 **Key features:**
 - **Interactive setup** - Beautiful gum-based UI for model selection and options
+- **Cheap-model handoff** - Auto-generates `.ralph/session-brief.md` so each new iteration starts from a curated working set instead of rediscovering context
 - **Accurate token tracking** - Parser counts actual bytes from every file read/write
-- **Gutter detection** - Detects when agent is stuck (same command failed 3x, file thrashing)
+- **Anti-thrash detection** - Detects when the agent is stuck on repeated failures, write-thrashing, or repeated large-file rereads
+- **Self-managing continuity** - Compacts live progress/activity logs and archives history so long runs stay restartable
 - **Rate limit handling** - Detects rate limits/network errors, waits with exponential backoff
 - **Task caching** - YAML backend with mtime invalidation for efficient task parsing
 - **Learning from failures** - Agent updates `.ralph/guardrails.md` with lessons
 - **State in git** - Commits frequently so next agent picks up from git history
+- **Sequential run locking** - Prevents overlapping Ralph loops from stepping on the same workspace
 - **Branch/PR workflow** - Optionally work on a branch and open PR when complete
+
+## Why This Works Better with Cheap Models
+
+The original Ralph idea assumes the model can reconstruct missing context cheaply. In practice, weaker models often burn most of their budget rereading large files and rebuilding the same mental state.
+
+This version makes restart state explicit and portable:
+- `session-brief.md` carries forward the current target, recent findings, dirty files, and large-file cautions
+- `progress.md` stays compact while detailed history is rotated into `.ralph/archive/`
+- the parser stops obvious reread loops before they become multi-iteration spirals
+- file discovery is repo-agnostic, so the same scaffolding works across very different codebases
 
 ## Prerequisites
 
@@ -90,7 +104,7 @@ This creates two problems:
 
 ```bash
 cd your-project
-curl -fsSL https://raw.githubusercontent.com/agrimsingh/ralph-wiggum-cursor/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/FX-991ES-Plus-C/cheap_ralph-wiggum-cursor/main/install.sh | bash
 ```
 
 This creates:
@@ -107,6 +121,7 @@ your-project/
 │   ├── task-parser.sh          # YAML-backed task parsing
 │   └── init-ralph.sh           # Re-initialize if needed
 ├── .ralph/                     # State files (tracked in git)
+│   ├── session-brief.md        # Auto-generated restart brief (agent reads first)
 │   ├── progress.md             # Agent updates: what's done
 │   ├── guardrails.md           # Lessons learned (Signs)
 │   ├── activity.log            # Tool call log (parser writes)
@@ -189,9 +204,10 @@ Ralph will:
 1. Show interactive UI for model and options (or simple prompts if gum not installed)
 2. Run `cursor-agent` with your task
 3. Parse output in real-time, tracking token usage
-4. At 70k tokens: warn agent to wrap up current work
-5. At 80k tokens: rotate to fresh context
-6. Repeat until all `[ ]` are `[x]` (or max iterations reached)
+4. Generate `.ralph/session-brief.md` before each iteration so the next agent starts from a curated handoff
+5. At 170k tokens: warn agent to wrap up current work
+6. At 200k tokens: rotate to fresh context
+7. Repeat until all `[ ]` are `[x]` (or max iterations reached)
 
 ### 5. Monitor Progress
 
@@ -203,7 +219,7 @@ tail -f .ralph/activity.log
 # [12:34:56] 🟢 READ src/index.ts (245 lines, ~24.5KB)
 # [12:34:58] 🟢 WRITE src/routes/users.ts (50 lines, 2.1KB)
 # [12:35:01] 🟢 SHELL pnpm test → exit 0
-# [12:35:10] 🟢 TOKENS: 45,230 / 80,000 (56%) [read:30KB write:5KB assist:10KB shell:0KB]
+# [12:35:10] 🟢 TOKENS: 111,230 / 200,000 (56%) [read:30KB write:5KB assist:10KB shell:0KB]
 
 # Check for failures
 cat .ralph/errors.log
@@ -443,22 +459,22 @@ Iteration 1                    Iteration 2                    Iteration N
 │ Fresh context    │          │ Fresh context    │          │ Fresh context    │
 │       │          │          │       │          │          │       │          │
 │       ▼          │          │       ▼          │          │       ▼          │
-│ Read RALPH_TASK  │          │ Read RALPH_TASK  │          │ Read RALPH_TASK  │
-│ Read guardrails  │──────────│ Read guardrails  │──────────│ Read guardrails  │
-│ Read progress    │  (state  │ Read progress    │  (state  │ Read progress    │
+│ Read session brief│         │ Read session brief│         │ Read session brief│
+│ Read task slice   │─────────│ Read task slice   │─────────│ Read task slice   │
+│ Read guardrails   │ (state  │ Read guardrails   │ (state  │ Read guardrails   │
 │       │          │  in git) │       │          │  in git) │       │          │
 │       ▼          │          │       ▼          │          │       ▼          │
 │ Work on criteria │          │ Work on criteria │          │ Work on criteria │
 │ Commit to git    │          │ Commit to git    │          │ Commit to git    │
 │       │          │          │       │          │          │       │          │
 │       ▼          │          │       ▼          │          │       ▼          │
-│ 80k tokens       │          │ 80k tokens       │          │ All [x] done!    │
+│ 200k tokens      │          │ 200k tokens      │          │ All [x] done!    │
 │ ROTATE ──────────┼──────────┼──────────────────┼──────────┼──► COMPLETE      │
 └──────────────────┘          └──────────────────┘          └──────────────────┘
 ```
 
 Each iteration:
-1. Reads task and state from files (not from previous context)
+1. Reads a curated restart brief and only the task/state files it actually needs
 2. Works on unchecked criteria
 3. Commits progress to git
 4. Updates `.ralph/progress.md` and `.ralph/guardrails.md`
@@ -502,14 +518,14 @@ The activity log shows context health with emoji:
 | Emoji | Status | Token % | Meaning |
 |-------|--------|---------|---------|
 | 🟢 | Healthy | < 60% | Plenty of room |
-| 🟡 | Warning | 60-80% | Approaching limit |
-| 🔴 | Critical | > 80% | Rotation imminent |
+| 🟡 | Warning | 60-85% | Approaching limit |
+| 🔴 | Critical | > 85% | Rotation imminent |
 
 Example:
 ```
 [12:34:56] 🟢 READ src/index.ts (245 lines, ~24.5KB)
-[12:40:22] 🟡 TOKENS: 58,000 / 80,000 (72%) - approaching limit [read:40KB write:8KB assist:10KB shell:0KB]
-[12:45:33] 🔴 TOKENS: 72,500 / 80,000 (90%) - rotation imminent
+[12:40:22] 🟡 TOKENS: 142,000 / 200,000 (71%) - approaching limit [read:40KB write:8KB assist:10KB shell:0KB]
+[12:45:33] 🔴 TOKENS: 181,000 / 200,000 (90%) - rotation imminent
 ```
 
 ## Gutter Detection
@@ -520,12 +536,19 @@ The parser detects when the agent is stuck:
 |---------|---------|--------------|
 | Repeated failure | Same command failed 3x | GUTTER signal |
 | File thrashing | Same file written 5x in 10 min | GUTTER signal |
+| Large-file reread thrash | Same large file reread before any write | GUTTER signal |
+| Rotate-without-progress streak | Repeated rotate sessions with no useful work | THRASH STOP |
 | Agent signals | Agent outputs `<ralph>GUTTER</ralph>` | GUTTER signal |
 
 When gutter is detected:
 1. Check `.ralph/errors.log` for the pattern
 2. Fix the issue manually or add a guardrail
 3. Re-run the loop
+
+When a `THRASH STOP` occurs:
+1. Check `.ralph/activity.log` and `.ralph/errors.log` for the repeated reread pattern
+2. Add or tighten a guardrail telling Ralph to use `rg -n`, `wc -l`, and `sed -n` before full-file reads
+3. Restart Ralph after adjusting the task or guardrails
 
 ## Rate Limit & Transient Error Handling
 
@@ -564,6 +587,7 @@ Both are verified before declaring success.
 | File | Purpose | Who Uses It |
 |------|---------|-------------|
 | `RALPH_TASK.md` | Task definition + success criteria | You define, agent reads |
+| `.ralph/session-brief.md` | Curated restart brief for the next iteration | Ralph generates, agent reads first |
 | `.ralph/progress.md` | What's been accomplished | Agent writes after work |
 | `.ralph/guardrails.md` | Lessons learned (Signs) | Agent reads first, writes after failures |
 | `.ralph/activity.log` | Tool call log with token counts | Parser writes, you monitor |
@@ -587,9 +611,13 @@ RALPH_MODEL=gpt-5.2-high MAX_ITERATIONS=50 ./ralph-loop.sh
 Default thresholds in `ralph-common.sh`:
 
 ```bash
-MAX_ITERATIONS=20       # Max rotations before giving up
-WARN_THRESHOLD=70000    # Tokens: send wrapup warning
-ROTATE_THRESHOLD=80000  # Tokens: force rotation
+MAX_ITERATIONS=20                   # Max iterations before giving up
+WARN_THRESHOLD=170000              # Tokens: send wrapup warning
+ROTATE_THRESHOLD=200000            # Tokens: force rotation
+AUTO_ROTATE_LOGS=true              # Compact live logs during long runs
+MAX_LARGE_REREADS_PER_FILE=3       # Stop repeated large rereads
+MAX_LARGE_READS_WITHOUT_WRITE=5    # Stop discovery-only thrash
+MAX_THRASH_ROTATIONS=3             # Halt after repeated rotate-without-progress
 ```
 
 ## Troubleshooting
@@ -609,8 +637,9 @@ Check `.ralph/errors.log` for the pattern. Either:
 ### Context rotates too frequently
 
 The agent might be reading too many large files. Check `activity.log` for large READs and consider:
-1. Adding a guardrail: "Don't read the entire file, use grep to find relevant sections"
-2. Breaking the task into smaller pieces
+1. Adding a guardrail: "Use `rg -n`, `wc -l`, and `sed -n` before full-reading large files"
+2. Tightening `RALPH_TASK.md` so the next unchecked criterion points to a narrower target
+3. Letting Ralph regenerate `.ralph/session-brief.md`, then restarting from the smaller handoff
 
 ### Task never completes
 
