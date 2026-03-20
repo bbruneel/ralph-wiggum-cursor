@@ -3,15 +3,16 @@
 
 from __future__ import annotations
 
+import asyncio
 import argparse
+import contextlib
 import os
 import shlex
 import signal
-import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import IO, Any
 
 
 LOG_TAIL_LIMITS = {
@@ -264,6 +265,41 @@ def load_dashboard_state(workspace: Path) -> DashboardState:
         token_pct=token_pct,
         health_label=health_label(token_pct),
         latest_signals=latest_signals,
+        views=views,
+    )
+
+
+def build_placeholder_state(workspace: Path) -> DashboardState:
+    task_file = select_task_file(workspace)
+    runtime = {
+        "RALPH_RUNTIME_STATUS": "loading",
+        "RALPH_RUNTIME_ITERATION": "0",
+        "RALPH_RUNTIME_MODEL": "loading",
+        "RALPH_RUNTIME_LAST_SIGNAL": "NONE",
+        "RALPH_RUNTIME_LAST_EVENT": "Hydrating dashboard",
+        "RALPH_RUNTIME_MODE": "monitor",
+        "RALPH_RUNTIME_UPDATED_AT": "not yet",
+    }
+    views = {
+        view_name: FileViewState(
+            body=f"Loading {VIEW_LABELS[view_name]}...\n",
+            meta="loading",
+        )
+        for view_name in VIEW_ORDER
+    }
+    return DashboardState(
+        workspace=workspace,
+        task_file=task_file,
+        runtime=runtime,
+        session={},
+        done_count=0,
+        total_count=0,
+        remaining_count=0,
+        next_task="Loading tasks...",
+        token_count=0,
+        token_pct=0,
+        health_label="CHILL",
+        latest_signals=[],
         views=views,
     )
 
@@ -533,9 +569,12 @@ def launch_textual_dashboard(workspace: Path, mode: str, child_args: list[str]) 
             self.help_expanded = True
             self.note = "Dashboard ready."
             self.tick = 0
-            self.last_state = load_dashboard_state(workspace)
-            self.child_process: subprocess.Popen[Any] | None = None
+            self.last_state = build_placeholder_state(workspace)
+            self.refresh_in_flight = False
+            self.child_process: asyncio.subprocess.Process | None = None
             self.child_exit_code = 0
+            self.console_handle: IO[str] | None = None
+            self.child_wait_task: asyncio.Task[None] | None = None
             self.console_path = workspace / ".ralph" / "tui-run.log"
 
         def compose(self) -> ComposeResult:
@@ -566,10 +605,10 @@ def launch_textual_dashboard(workspace: Path, mode: str, child_args: list[str]) 
             self.sub_title = str(self.workspace)
             if self.console_path.parent.exists():
                 self.console_path.touch()
-            self.refresh_dashboard()
-            self.set_interval(0.5, self.refresh_dashboard)
+            self.schedule_refresh()
+            self.set_interval(0.5, self.schedule_refresh)
             if self.mode == "loop":
-                self.start_child_loop()
+                asyncio.create_task(self.start_child_loop())
             if self.smoke_exit:
                 self.set_timer(0.2, self.exit)
 
@@ -580,7 +619,30 @@ def launch_textual_dashboard(workspace: Path, mode: str, child_args: list[str]) 
             view_name = self.active_view_name()
             return self.query_one(f"#{view_name}-view", FileView)
 
+        def schedule_refresh(self) -> None:
+            if self.refresh_in_flight:
+                return
+            self.refresh_in_flight = True
+            asyncio.create_task(self.refresh_dashboard_async())
+
+        async def refresh_dashboard_async(self) -> None:
+            try:
+                self.tick += 1
+                state = await asyncio.to_thread(load_dashboard_state, self.workspace)
+                self.last_state = state
+                self.update_cards()
+                self.update_help_strip()
+                self.update_status_strip()
+
+                for view_name in VIEW_ORDER:
+                    self.query_one(f"#{view_name}-view", FileView).set_state(
+                        self.last_state.views[view_name]
+                    )
+            finally:
+                self.refresh_in_flight = False
+
         def refresh_dashboard(self) -> None:
+            """Backward-compatible sync entrypoint used by snapshot/headless tests."""
             self.tick += 1
             self.last_state = load_dashboard_state(self.workspace)
             self.update_cards()
@@ -591,8 +653,6 @@ def launch_textual_dashboard(workspace: Path, mode: str, child_args: list[str]) 
                 self.query_one(f"#{view_name}-view", FileView).set_state(
                     self.last_state.views[view_name]
                 )
-
-            self.check_child_process()
 
         def update_cards(self) -> None:
             state = self.last_state
@@ -678,7 +738,7 @@ def launch_textual_dashboard(workspace: Path, mode: str, child_args: list[str]) 
             self.query_one("#help-strip", Static).update(message)
 
         def update_status_strip(self) -> None:
-            if self.child_process and self.child_process.poll() is None:
+            if self.child_process and self.child_process.returncode is None:
                 child_state = "Background Ralph loop is running."
             elif self.mode == "loop":
                 child_state = (
@@ -701,13 +761,13 @@ def launch_textual_dashboard(workspace: Path, mode: str, child_args: list[str]) 
             self.note = message
             self.update_status_strip()
 
-        def start_child_loop(self) -> None:
-            if self.child_process is not None and self.child_process.poll() is None:
+        async def start_child_loop(self) -> None:
+            if self.child_process is not None and self.child_process.returncode is None:
                 self.set_note("Loop already running.")
                 return
 
-            self.console_path.write_text("", encoding="utf-8")
-            console_handle = self.console_path.open("a", encoding="utf-8")
+            await asyncio.to_thread(self.console_path.write_text, "", encoding="utf-8")
+            self.console_handle = self.console_path.open("a", encoding="utf-8")
             loop_script = self.workspace / ".cursor" / "ralph-scripts" / "ralph-loop.sh"
             if not loop_script.exists():
                 loop_script = Path(__file__).resolve().parent / "ralph-loop.sh"
@@ -715,18 +775,36 @@ def launch_textual_dashboard(workspace: Path, mode: str, child_args: list[str]) 
             env = os.environ.copy()
             env["RALPH_TUI_ACTIVE"] = "1"
 
-            self.child_process = subprocess.Popen(
+            self.child_process = await asyncio.create_subprocess_exec(
                 [str(loop_script), *self.child_args],
-                stdout=console_handle,
-                stderr=subprocess.STDOUT,
+                stdout=self.console_handle,
+                stderr=asyncio.subprocess.STDOUT,
                 cwd=self.workspace,
                 env=env,
-                preexec_fn=os.setsid,
+                start_new_session=True,
             )
+            self.child_wait_task = asyncio.create_task(self.wait_for_child_loop())
             self.set_note("Launched Ralph loop in the background.")
 
-        def stop_child_loop(self) -> None:
-            if self.child_process is None or self.child_process.poll() is not None:
+        async def wait_for_child_loop(self) -> None:
+            if self.child_process is None:
+                return
+
+            process = self.child_process
+            exit_code = await process.wait()
+            self.child_exit_code = exit_code
+            if self.child_process is process:
+                self.child_process = None
+            await self.close_console_handle()
+            self.set_note(f"Background Ralph loop finished with exit code {exit_code}.")
+
+        async def close_console_handle(self) -> None:
+            if self.console_handle is not None and not self.console_handle.closed:
+                await asyncio.to_thread(self.console_handle.close)
+            self.console_handle = None
+
+        async def stop_child_loop(self) -> None:
+            if self.child_process is None or self.child_process.returncode is not None:
                 self.set_note("No launched Ralph loop is running.")
                 return
 
@@ -737,25 +815,25 @@ def launch_textual_dashboard(workspace: Path, mode: str, child_args: list[str]) 
                 pass
 
             try:
-                self.child_exit_code = self.child_process.wait(timeout=2)
-            except subprocess.TimeoutExpired:
+                self.child_exit_code = await asyncio.wait_for(
+                    self.child_process.wait(), timeout=2
+                )
+            except asyncio.TimeoutError:
                 try:
                     os.killpg(self.child_process.pid, signal.SIGKILL)
                 except ProcessLookupError:
                     pass
-                self.child_exit_code = self.child_process.wait()
+                self.child_exit_code = await self.child_process.wait()
 
-            self.set_note("Stopped the launched Ralph loop.")
+            if self.child_wait_task is not None:
+                self.child_wait_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await self.child_wait_task
+                self.child_wait_task = None
 
-        def check_child_process(self) -> None:
-            if self.child_process is None:
-                return
-            exit_code = self.child_process.poll()
-            if exit_code is None:
-                return
-            self.child_exit_code = exit_code
             self.child_process = None
-            self.set_note(f"Background Ralph loop finished with exit code {exit_code}.")
+            await self.close_console_handle()
+            self.set_note("Stopped the launched Ralph loop.")
 
         def show_view(self, view_name: str) -> None:
             self.query_one(TabbedContent).active = view_name
@@ -807,27 +885,35 @@ def launch_textual_dashboard(workspace: Path, mode: str, child_args: list[str]) 
         def action_scroll_end(self) -> None:
             self.active_file_view().scroll_end_fast()
 
-        def action_refresh_now(self) -> None:
+        async def action_refresh_now(self) -> None:
+            await self.refresh_dashboard_async()
             self.set_note("Manual refresh complete.")
-            self.refresh_dashboard()
 
         def action_toggle_help(self) -> None:
             self.help_expanded = not self.help_expanded
             self.set_note("Help expanded." if self.help_expanded else "Help collapsed.")
             self.update_help_strip()
 
-        def action_stop_loop(self) -> None:
-            self.stop_child_loop()
+        async def action_stop_loop(self) -> None:
+            await self.stop_child_loop()
 
         def action_quit_dashboard(self) -> None:
-            if self.child_process is not None and self.child_process.poll() is None:
+            if self.child_process is not None and self.child_process.returncode is None:
                 self.set_note("Loop still running. Press x first if you want to stop it.")
                 return
             self.exit()
 
         def finalize(self) -> None:
-            if self.child_process is not None and self.child_process.poll() is None:
-                self.stop_child_loop()
+            if self.child_wait_task is not None:
+                self.child_wait_task.cancel()
+                self.child_wait_task = None
+            if self.console_handle is not None and not self.console_handle.closed:
+                self.console_handle.close()
+                self.console_handle = None
+            if self.child_process is not None and self.child_process.returncode is None:
+                with contextlib.suppress(ProcessLookupError):
+                    assert self.child_process.pid is not None
+                    os.killpg(self.child_process.pid, signal.SIGTERM)
 
     headless = os.environ.get("RALPH_TUI_HEADLESS") == "1"
     size = None
