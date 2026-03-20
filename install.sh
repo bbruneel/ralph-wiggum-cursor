@@ -249,7 +249,7 @@ write_file_if_missing .ralph/runtime.env << 'EOF'
 # Ralph runtime state
 RALPH_RUNTIME_STATUS=idle
 RALPH_RUNTIME_ITERATION=0
-RALPH_RUNTIME_MODEL=opus-4.5-thinking
+RALPH_RUNTIME_MODEL=auto
 RALPH_RUNTIME_LAST_SIGNAL=NONE
 RALPH_RUNTIME_LAST_EVENT=Waiting\ for\ Ralph
 RALPH_RUNTIME_MODE=loop

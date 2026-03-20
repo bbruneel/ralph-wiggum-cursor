@@ -147,7 +147,8 @@ With gum, you get a beautiful interactive menu for selecting models and options:
 
 ```
 ? Select model:
-  ◉ opus-4.5-thinking
+  ◉ auto
+  ◯ opus-4.5-thinking
   ◯ sonnet-4.5-thinking
   ◯ gpt-5.2-high
   ◯ composer-1
@@ -278,7 +279,7 @@ cat .ralph/errors.log
 
 Options:
   -n, --iterations N     Max iterations (default: 20)
-  -m, --model MODEL      Model to use (default: opus-4.5-thinking)
+  -m, --model MODEL      Model to use (default: auto)
   --branch NAME          Sequential: create/work on branch; Parallel: integration branch name
   --pr                   Sequential: open PR (requires --branch); Parallel: open ONE integration PR (branch optional)
   --parallel             Run tasks in parallel with worktrees

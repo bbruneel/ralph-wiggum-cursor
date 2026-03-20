@@ -54,7 +54,7 @@ LOCK_STALE_MINUTES="${LOCK_STALE_MINUTES:-45}"
 SEQUENTIAL_LOCK_HELD="${SEQUENTIAL_LOCK_HELD:-}"
 
 # Model selection
-DEFAULT_MODEL="opus-4.5-thinking"
+DEFAULT_MODEL="auto"
 MODEL="${RALPH_MODEL:-$DEFAULT_MODEL}"
 
 # Feature flags (set by caller)
@@ -1707,19 +1707,25 @@ check_prerequisites() {
 # Check dashboard-specific prerequisites
 check_dashboard_prerequisites() {
   local script_dir="${1:-$(dirname "${BASH_SOURCE[0]}")}"
+  local python_bin="${PYTHON_BIN:-python3}"
 
-  if ! command -v python3 &> /dev/null; then
-    echo "❌ --dashboard requires python3"
+  if ! command -v "$python_bin" &> /dev/null; then
+    echo "❌ --dashboard requires $python_bin"
     return 1
   fi
 
-  if ! python3 - <<'PY' >/dev/null 2>&1
+  if ! "$python_bin" - <<'PY' >/dev/null 2>&1
 import importlib.util
 raise SystemExit(0 if importlib.util.find_spec("textual") else 1)
 PY
   then
     echo "❌ --dashboard requires the Python 'textual' package"
-    echo "   Install via: python3 -m pip install textual"
+    echo "   Interpreter: $("$python_bin" - <<'PY'
+import sys
+print(sys.executable)
+PY
+)"
+    echo "   Install via: $python_bin -m pip install textual"
     return 1
   fi
 

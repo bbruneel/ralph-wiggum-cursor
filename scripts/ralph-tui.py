@@ -356,13 +356,14 @@ def normalize_args(args: argparse.Namespace) -> tuple[str, Path, list[str]]:
 
 
 def require_textual() -> None:
+    python_bin = os.environ.get("PYTHON_BIN", sys.executable)
     try:
         import textual  # noqa: F401
     except ImportError as exc:  # pragma: no cover - exercised manually
         print("❌ The Ralph dashboard now uses Python + Textual.", file=sys.stderr)
         print("", file=sys.stderr)
         print("Install the dependency with:", file=sys.stderr)
-        print("  python3 -m pip install textual", file=sys.stderr)
+        print(f"  {python_bin} -m pip install textual", file=sys.stderr)
         print("", file=sys.stderr)
         print("Then rerun Ralph with --dashboard.", file=sys.stderr)
         raise SystemExit(1) from exc
