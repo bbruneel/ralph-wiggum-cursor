@@ -1,10 +1,10 @@
 #!/bin/bash
 # Ralph Wiggum: One-click installer
-# Usage: curl -fsSL https://raw.githubusercontent.com/agrimsingh/ralph-wiggum-cursor/main/install.sh | bash
+# Usage: curl -fsSL https://raw.githubusercontent.com/FX-991ES-Plus-C/cheap_ralph-wiggum-cursor/main/install.sh | bash
 
 set -euo pipefail
 
-REPO_RAW="https://raw.githubusercontent.com/agrimsingh/ralph-wiggum-cursor/main"
+REPO_RAW="${REPO_RAW:-https://raw.githubusercontent.com/FX-991ES-Plus-C/cheap_ralph-wiggum-cursor/main}"
 
 echo "═══════════════════════════════════════════════════════════════════"
 echo "🐛 Ralph Wiggum Installer"
@@ -35,6 +35,8 @@ if ! command -v gum &> /dev/null; then
   SHOULD_INSTALL=""
   if [[ "${INSTALL_GUM:-}" == "1" ]]; then
     SHOULD_INSTALL="y"
+  elif [[ "${INSTALL_GUM:-}" == "0" ]]; then
+    SHOULD_INSTALL="n"
   else
     read -p "   Install gum? [y/N] " -n 1 -r < /dev/tty
     echo
@@ -83,6 +85,8 @@ PY
     SHOULD_INSTALL_TEXTUAL=""
     if [[ "${INSTALL_TEXTUAL:-}" == "1" ]]; then
       SHOULD_INSTALL_TEXTUAL="y"
+    elif [[ "${INSTALL_TEXTUAL:-}" == "0" ]]; then
+      SHOULD_INSTALL_TEXTUAL="n"
     else
       read -p "   Install textual with pip? [y/N] " -n 1 -r < /dev/tty
       echo
@@ -100,6 +104,19 @@ else
 fi
 
 WORKSPACE_ROOT="$(pwd)"
+
+write_file_if_missing() {
+  local path="$1"
+
+  if [[ -f "$path" ]]; then
+    echo "✓ Preserved $path"
+    return 0
+  fi
+
+  mkdir -p "$(dirname "$path")"
+  cat > "$path"
+  echo "✓ Created $path"
+}
 
 # =============================================================================
 # CREATE DIRECTORIES
@@ -145,7 +162,7 @@ echo "✓ Scripts installed to .cursor/ralph-scripts/"
 
 echo "📁 Initializing .ralph/ state directory..."
 
-cat > .ralph/guardrails.md << 'EOF'
+write_file_if_missing .ralph/guardrails.md << 'EOF'
 # Ralph Guardrails (Signs)
 
 > Lessons learned from past failures. READ THESE BEFORE ACTING.
@@ -175,7 +192,7 @@ cat > .ralph/guardrails.md << 'EOF'
 
 EOF
 
-cat > .ralph/progress.md << 'EOF'
+write_file_if_missing .ralph/progress.md << 'EOF'
 # Progress Log
 
 > Updated by the agent after significant work.
@@ -195,28 +212,28 @@ This is how Ralph maintains continuity across iterations.
 
 EOF
 
-cat > .ralph/errors.log << 'EOF'
+write_file_if_missing .ralph/errors.log << 'EOF'
 # Error Log
 
 > Failures detected by stream-parser. Use to update guardrails.
 
 EOF
 
-cat > .ralph/activity.log << 'EOF'
+write_file_if_missing .ralph/activity.log << 'EOF'
 # Activity Log
 
 > Real-time tool call logging from stream-parser.
 
 EOF
 
-cat > .ralph/signals.log << 'EOF'
+write_file_if_missing .ralph/signals.log << 'EOF'
 # Signal Log
 
 > Durable signal/event history for the Ralph dashboard.
 
 EOF
 
-cat > .ralph/session-brief.md << 'EOF'
+write_file_if_missing .ralph/session-brief.md << 'EOF'
 # Ralph Session Brief
 
 > Auto-generated before each iteration. Read this first.
@@ -228,7 +245,7 @@ cat > .ralph/session-brief.md << 'EOF'
 
 EOF
 
-cat > .ralph/runtime.env << 'EOF'
+write_file_if_missing .ralph/runtime.env << 'EOF'
 # Ralph runtime state
 RALPH_RUNTIME_STATUS=idle
 RALPH_RUNTIME_ITERATION=0
@@ -240,9 +257,14 @@ RALPH_RUNTIME_AGENT_PID=''
 RALPH_RUNTIME_UPDATED_AT=not\ yet
 EOF
 
-echo "0" > .ralph/.iteration
+if [[ ! -f .ralph/.iteration ]]; then
+  echo "0" > .ralph/.iteration
+  echo "✓ Created .ralph/.iteration"
+else
+  echo "✓ Preserved .ralph/.iteration"
+fi
 
-echo "✓ .ralph/ initialized"
+echo "✓ .ralph/ upgrade complete"
 
 # =============================================================================
 # CREATE RALPH_TASK.md TEMPLATE
@@ -302,7 +324,7 @@ $ npx ts-node todo.ts done 1
 TASKEOF
   echo "✓ Created RALPH_TASK.md with example task"
 else
-  echo "✓ RALPH_TASK.md already exists (not overwritten)"
+  echo "✓ Preserved RALPH_TASK.md"
 fi
 
 # =============================================================================

@@ -135,6 +135,8 @@ your-project/
 └── RALPH_TASK.md               # Your task definition
 ```
 
+You can rerun the installer later to upgrade the Ralph scripts. Existing `.ralph/` state and `RALPH_TASK.md` are preserved; only missing state files are created.
+
 ### 2. (Optional) gum for Enhanced UI
 
 The installer will offer to install gum automatically. You can also:
