@@ -161,6 +161,8 @@ main() {
   fi
 
   if [[ "$DASHBOARD_MODE" == "true" ]] && [[ "${RALPH_TUI_ACTIVE:-0}" != "1" ]]; then
+    init_ralph_dir "$WORKSPACE"
+    write_runtime_state "$WORKSPACE" "starting" "$(get_iteration "$WORKSPACE")" "$MODEL" "NONE" "Dashboard launching" "loop" ""
     local -a dashboard_args
     dashboard_args=(-n "$MAX_ITERATIONS" -m "$MODEL" -y)
     [[ -n "$USE_BRANCH" ]] && dashboard_args+=(--branch "$USE_BRANCH")
