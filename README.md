@@ -69,6 +69,7 @@ This creates two problems:
 
 **Key features:**
 - **Interactive setup** - Beautiful gum-based UI for model selection and options
+- **FUN live dashboard** - Lightweight fullscreen TUI for activity, progress, tasks, errors, and signal history
 - **Cheap-model handoff** - Auto-generates `.ralph/session-brief.md` so each new iteration starts from a curated working set instead of rediscovering context
 - **Accurate token tracking** - Parser counts actual bytes from every file read/write
 - **Anti-thrash detection** - Detects when the agent is stuck on repeated failures, write-thrashing, or repeated large-file rereads
@@ -97,6 +98,7 @@ This version makes restart state explicit and portable:
 | **Git repo** | `git status` works | `git init` |
 | **cursor-agent CLI** | `which cursor-agent` | `curl https://cursor.com/install -fsS \| bash` |
 | **gum** (optional) | `which gum` | Installer offers to install, or `brew install gum` |
+| **python3 + textual** (dashboard only) | `python3 -c "import textual"` | Installer offers to install, or `python3 -m pip install textual` |
 
 ## Quick Start
 
@@ -114,6 +116,7 @@ your-project/
 │   ├── ralph-setup.sh          # Main entry point (interactive)
 │   ├── ralph-loop.sh           # CLI mode (for scripting)
 │   ├── ralph-once.sh           # Single iteration (testing)
+│   ├── ralph-tui.py            # Textual live dashboard / monitor
 │   ├── ralph-parallel.sh       # Parallel execution with worktrees
 │   ├── stream-parser.sh        # Token tracking + error detection
 │   ├── ralph-common.sh         # Shared functions
@@ -125,6 +128,7 @@ your-project/
 │   ├── progress.md             # Agent updates: what's done
 │   ├── guardrails.md           # Lessons learned (Signs)
 │   ├── activity.log            # Tool call log (parser writes)
+│   ├── signals.log             # Durable WARN/ROTATE/GUTTER/etc history
 │   ├── errors.log              # Failure log (parser writes)
 │   └── tasks.yaml              # Cached task state (auto-generated)
 ├── .ralph-worktrees/           # Temporary (parallel mode only)
@@ -164,6 +168,14 @@ If you select "Run in parallel mode", you'll be prompted for:
 ```
 
 Without gum, Ralph falls back to simple numbered prompts.
+
+### 2b. (Optional) Textual for the Dashboard
+
+The installer will offer to install `textual` automatically when `python3` is available. You can also install it manually:
+
+```bash
+python3 -m pip install textual
+```
 
 ### 3. Define Your Task
 
@@ -209,11 +221,34 @@ Ralph will:
 6. At 200k tokens: rotate to fresh context
 7. Repeat until all `[ ]` are `[x]` (or max iterations reached)
 
+### 4b. Run with the Dashboard
+
+```bash
+./.cursor/ralph-scripts/ralph-loop.sh --dashboard -y
+```
+
+This opens the Textual dashboard with:
+- `1` `activity.log`
+- `2` `progress.md`
+- `3` `RALPH_TASK.md` / `ralph-tasks.md`
+- `4` `signals.log`
+- `5` `errors.log`
+- `6` dashboard console log
+- `tab` / `shift+tab` to cycle panes
+- `up/down`, `j/k`, `pgup/pgdn`, `g/G` to scroll
+- `?` to toggle the inline help
+- `x` to stop a dashboard-launched Ralph loop
+
+It reads durable state from `.ralph/runtime.env`, `.ralph/signals.log`, and `.ralph/.last-session.env`, so WARN / ROTATE / GUTTER / COMPLETE / DEFER stay connected to the UI.
+
 ### 5. Monitor Progress
 
 ```bash
 # Watch activity in real-time
 tail -f .ralph/activity.log
+
+# Watch signal history in real-time
+tail -f .ralph/signals.log
 
 # Example output:
 # [12:34:56] 🟢 READ src/index.ts (245 lines, ~24.5KB)

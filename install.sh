@@ -71,6 +71,34 @@ gpgkey=https://repo.charm.sh/yum/gpg.key' | sudo tee /etc/yum.repos.d/charm.repo
   echo ""
 fi
 
+# Check for Textual and offer to install
+if command -v python3 &> /dev/null; then
+  if ! python3 - <<'PY' >/dev/null 2>&1
+import importlib.util
+raise SystemExit(0 if importlib.util.find_spec("textual") else 1)
+PY
+  then
+    echo "📦 Python package 'textual' not found (powers the FUN dashboard)"
+
+    SHOULD_INSTALL_TEXTUAL=""
+    if [[ "${INSTALL_TEXTUAL:-}" == "1" ]]; then
+      SHOULD_INSTALL_TEXTUAL="y"
+    else
+      read -p "   Install textual with pip? [y/N] " -n 1 -r < /dev/tty
+      echo
+      SHOULD_INSTALL_TEXTUAL="$REPLY"
+    fi
+
+    if [[ "$SHOULD_INSTALL_TEXTUAL" =~ ^[Yy]$ ]]; then
+      python3 -m pip install --user textual || echo "   ⚠️  Could not install textual automatically."
+    fi
+    echo ""
+  fi
+else
+  echo "⚠️  python3 not found. The Textual dashboard requires python3 + textual."
+  echo ""
+fi
+
 WORKSPACE_ROOT="$(pwd)"
 
 # =============================================================================
@@ -93,6 +121,7 @@ SCRIPTS=(
   "ralph-loop.sh"
   "ralph-once.sh"
   "ralph-parallel.sh"
+  "ralph-tui.py"
   "stream-parser.sh"
   "task-parser.sh"
   "ralph-retry.sh"
@@ -178,6 +207,37 @@ cat > .ralph/activity.log << 'EOF'
 
 > Real-time tool call logging from stream-parser.
 
+EOF
+
+cat > .ralph/signals.log << 'EOF'
+# Signal Log
+
+> Durable signal/event history for the Ralph dashboard.
+
+EOF
+
+cat > .ralph/session-brief.md << 'EOF'
+# Ralph Session Brief
+
+> Auto-generated before each iteration. Read this first.
+
+- Generated: not yet
+- Criteria: 0 / 0 complete
+- Next unchecked criterion: unknown
+- Read strategy: open the relevant slice of `RALPH_TASK.md`, not the whole repo.
+
+EOF
+
+cat > .ralph/runtime.env << 'EOF'
+# Ralph runtime state
+RALPH_RUNTIME_STATUS=idle
+RALPH_RUNTIME_ITERATION=0
+RALPH_RUNTIME_MODEL=opus-4.5-thinking
+RALPH_RUNTIME_LAST_SIGNAL=NONE
+RALPH_RUNTIME_LAST_EVENT=Waiting\ for\ Ralph
+RALPH_RUNTIME_MODE=loop
+RALPH_RUNTIME_AGENT_PID=''
+RALPH_RUNTIME_UPDATED_AT=not\ yet
 EOF
 
 echo "0" > .ralph/.iteration

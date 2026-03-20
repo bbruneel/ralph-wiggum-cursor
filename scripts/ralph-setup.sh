@@ -108,6 +108,7 @@ select_options() {
     "Work on new branch"
     "Open PR when complete"
     "Run in parallel mode"
+    "Open FUN dashboard"
   )
   
   if [[ "$HAS_GUM" == "true" ]]; then
@@ -272,6 +273,7 @@ main() {
   # Parse selected options
   local run_single_first=false
   local parallel_mode=false
+  local dashboard_mode=false
   local max_parallel=3
   USE_BRANCH=""
   OPEN_PR=false
@@ -297,6 +299,10 @@ main() {
         parallel_mode=true
         max_parallel=$(get_max_parallel)
         echo "✓ Parallel mode: $max_parallel agents"
+        ;;
+      "Open FUN dashboard")
+        dashboard_mode=true
+        echo "✓ Dashboard: FUN mode enabled"
         ;;
     esac
   done <<< "$selected_options"
@@ -324,7 +330,12 @@ main() {
   [[ "$OPEN_PR" == "true" ]] && echo "  • Open PR:    Yes"
   [[ "$run_single_first" == "true" ]] && echo "  • Test first: Yes (single iteration)"
   [[ "$parallel_mode" == "true" ]] && echo "  • Parallel:   $max_parallel agents"
+  [[ "$dashboard_mode" == "true" ]] && echo "  • Dashboard:  Yes"
   echo "─────────────────────────────────────────────────────────────────"
+  if [[ "$dashboard_mode" == "true" ]] && [[ "$run_single_first" == "true" ]]; then
+    echo "Note: the FUN dashboard takes over for full-loop mode; the preview iteration stays in the standard view."
+    echo ""
+  fi
   echo ""
   
   if ! confirm_action "Start Ralph loop?"; then
@@ -341,6 +352,18 @@ main() {
   export MAX_ITERATIONS
   export USE_BRANCH
   export OPEN_PR
+
+  if [[ "$dashboard_mode" == "true" ]] && [[ "$run_single_first" != "true" ]]; then
+    local -a dashboard_args
+    dashboard_args=(--dashboard -n "$MAX_ITERATIONS" -m "$MODEL" -y)
+    [[ -n "$USE_BRANCH" ]] && dashboard_args+=(--branch "$USE_BRANCH")
+    [[ "$OPEN_PR" == "true" ]] && dashboard_args+=(--pr)
+    if [[ "$parallel_mode" == "true" ]]; then
+      dashboard_args+=(--parallel --max-parallel "$max_parallel")
+    fi
+
+    exec "$SCRIPT_DIR/ralph-loop.sh" "${dashboard_args[@]}" "$workspace"
+  fi
   
   # Handle single iteration first
   if [[ "$run_single_first" == "true" ]]; then

@@ -143,6 +143,13 @@ cat > .ralph/activity.log << 'EOF'
 
 EOF
 
+cat > .ralph/signals.log << 'EOF'
+# Signal Log
+
+> Durable signal/event history for the Ralph dashboard.
+
+EOF
+
 cat > .ralph/session-brief.md << 'EOF'
 # Ralph Session Brief
 
@@ -155,6 +162,18 @@ cat > .ralph/session-brief.md << 'EOF'
 
 EOF
 
+cat > .ralph/runtime.env << 'EOF'
+# Ralph runtime state
+RALPH_RUNTIME_STATUS=idle
+RALPH_RUNTIME_ITERATION=0
+RALPH_RUNTIME_MODEL=opus-4.5-thinking
+RALPH_RUNTIME_LAST_SIGNAL=NONE
+RALPH_RUNTIME_LAST_EVENT=Waiting\ for\ Ralph
+RALPH_RUNTIME_MODE=loop
+RALPH_RUNTIME_AGENT_PID=''
+RALPH_RUNTIME_UPDATED_AT=not\ yet
+EOF
+
 echo "0" > .ralph/.iteration
 
 # =============================================================================
@@ -165,7 +184,9 @@ echo "📦 Installing scripts..."
 
 # Copy scripts
 cp "$SKILL_DIR/scripts/"*.sh .cursor/ralph-scripts/ 2>/dev/null || true
+cp "$SKILL_DIR/scripts/"*.py .cursor/ralph-scripts/ 2>/dev/null || true
 chmod +x .cursor/ralph-scripts/*.sh 2>/dev/null || true
+chmod +x .cursor/ralph-scripts/*.py 2>/dev/null || true
 
 echo "✓ Scripts installed to .cursor/ralph-scripts/"
 
@@ -204,6 +225,7 @@ echo "  • .ralph/session-brief.md - Auto-generated restart brief (agent reads 
 echo "  • .ralph/guardrails.md - Lessons learned (agent updates this)"
 echo "  • .ralph/progress.md   - Progress log (agent updates this)"
 echo "  • .ralph/activity.log  - Tool call log (parser updates this)"
+echo "  • .ralph/signals.log   - Signal/event history (dashboard reads this)"
 echo "  • .ralph/errors.log    - Failure log (parser updates this)"
 echo ""
 echo "Next steps:"

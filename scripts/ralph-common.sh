@@ -205,6 +205,59 @@ log_progress() {
   echo "$message" >> "$progress_file"
 }
 
+# Persist lightweight runtime state for the Ralph dashboard/TUI
+write_runtime_state() {
+  local workspace="$1"
+  local status="${2:-idle}"
+  local iteration="${3:-0}"
+  local model="${4:-$MODEL}"
+  local last_signal="${5:-NONE}"
+  local last_event="${6:-Waiting for Ralph}"
+  local mode="${7:-sequential}"
+  local agent_pid="${8:-}"
+  local state_file="$workspace/.ralph/runtime.env"
+  local tmp_file
+
+  mkdir -p "$workspace/.ralph"
+  tmp_file=$(mktemp)
+
+  {
+    echo "# Ralph runtime state"
+    printf 'RALPH_RUNTIME_STATUS=%q\n' "$status"
+    printf 'RALPH_RUNTIME_ITERATION=%q\n' "$iteration"
+    printf 'RALPH_RUNTIME_MODEL=%q\n' "$model"
+    printf 'RALPH_RUNTIME_LAST_SIGNAL=%q\n' "$last_signal"
+    printf 'RALPH_RUNTIME_LAST_EVENT=%q\n' "$last_event"
+    printf 'RALPH_RUNTIME_MODE=%q\n' "$mode"
+    printf 'RALPH_RUNTIME_AGENT_PID=%q\n' "$agent_pid"
+    printf 'RALPH_RUNTIME_UPDATED_AT=%q\n' "$(date '+%Y-%m-%d %H:%M:%S %Z')"
+  } > "$tmp_file"
+
+  mv "$tmp_file" "$state_file"
+}
+
+# Append a durable signal/event record for the dashboard
+append_signal_event() {
+  local workspace="$1"
+  local signal="$2"
+  local detail="${3:-}"
+  local source="${4:-loop}"
+  local iteration="${5:-}"
+  local signals_file="$workspace/.ralph/signals.log"
+  local timestamp
+
+  mkdir -p "$workspace/.ralph"
+  timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+
+  if [[ -n "$detail" ]]; then
+    printf '[%s] source=%s iteration=%s signal=%s | %s\n' \
+      "$timestamp" "$source" "${iteration:-?}" "$signal" "$detail" >> "$signals_file"
+  else
+    printf '[%s] source=%s iteration=%s signal=%s\n' \
+      "$timestamp" "$source" "${iteration:-?}" "$signal" >> "$signals_file"
+  fi
+}
+
 # =============================================================================
 # LOG COMPACTION
 # =============================================================================
@@ -951,6 +1004,16 @@ EOF
 EOF
   fi
 
+  # Initialize signals.log if it doesn't exist
+  if [[ ! -f "$ralph_dir/signals.log" ]]; then
+    cat > "$ralph_dir/signals.log" << 'EOF'
+# Signal Log
+
+> Durable signal/event history for the Ralph dashboard.
+
+EOF
+  fi
+
   # Initialize session-brief.md if it doesn't exist
   if [[ ! -f "$ralph_dir/session-brief.md" ]]; then
     cat > "$ralph_dir/session-brief.md" << 'EOF'
@@ -964,6 +1027,10 @@ EOF
 - Read strategy: open the relevant slice of `RALPH_TASK.md`, not the whole repo.
 
 EOF
+  fi
+
+  if [[ ! -f "$ralph_dir/runtime.env" ]]; then
+    write_runtime_state "$workspace" "idle" "$(get_iteration "$workspace")" "$MODEL" "NONE" "Waiting for Ralph"
   fi
 }
 
@@ -1243,6 +1310,9 @@ run_iteration() {
   local prompt=$(build_prompt "$workspace" "$iteration")
   local fifo="$workspace/.ralph/.parser_fifo"
   
+  write_runtime_state "$workspace" "running" "$iteration" "$MODEL" "NONE" "Session $iteration starting" "sequential" ""
+  append_signal_event "$workspace" "SESSION_START" "model=$MODEL" "loop" "$iteration"
+  
   # Create named pipe for parser signals
   rm -f "$fifo"
   mkfifo "$fifo"
@@ -1284,9 +1354,12 @@ run_iteration() {
     export VERY_LARGE_READ_THRESHOLD_BYTES="$VERY_LARGE_READ_THRESHOLD_BYTES"
     export MAX_LARGE_REREADS_PER_FILE="$MAX_LARGE_REREADS_PER_FILE"
     export MAX_LARGE_READS_WITHOUT_WRITE="$MAX_LARGE_READS_WITHOUT_WRITE"
+    export RALPH_ITERATION="$iteration"
+    export RALPH_MODEL_RUNTIME="$MODEL"
     "${agent_cmd[@]}" "$prompt" 2>&1 | "$script_dir/stream-parser.sh" "$workspace" > "$fifo"
   ) &
   local agent_pid=$!
+  write_runtime_state "$workspace" "running" "$iteration" "$MODEL" "NONE" "Session $iteration running" "sequential" "$agent_pid"
   
   # Read signals from parser
   local signal=""
@@ -1295,6 +1368,7 @@ run_iteration() {
       "ROTATE")
         printf "\r\033[K" >&2  # Clear spinner line
         echo "🔄 Context rotation triggered - stopping agent..." >&2
+        write_runtime_state "$workspace" "rotating" "$iteration" "$MODEL" "ROTATE" "Context rotation requested" "sequential" "$agent_pid"
         stop_process_tree "$agent_pid"
         signal="ROTATE"
         break
@@ -1302,23 +1376,27 @@ run_iteration() {
       "WARN")
         printf "\r\033[K" >&2  # Clear spinner line
         echo "⚠️  Context warning - agent should wrap up soon..." >&2
+        write_runtime_state "$workspace" "running" "$iteration" "$MODEL" "WARN" "Context warning issued" "sequential" "$agent_pid"
         # Send interrupt to encourage wrap-up (agent continues but is notified)
         ;;
       "GUTTER")
         printf "\r\033[K" >&2  # Clear spinner line
         echo "🚨 Gutter detected - agent may be stuck..." >&2
+        write_runtime_state "$workspace" "gutter" "$iteration" "$MODEL" "GUTTER" "Gutter detected" "sequential" "$agent_pid"
         signal="GUTTER"
         # Don't kill yet, let agent try to recover
         ;;
       "COMPLETE")
         printf "\r\033[K" >&2  # Clear spinner line
         echo "✅ Agent signaled completion!" >&2
+        write_runtime_state "$workspace" "complete" "$iteration" "$MODEL" "COMPLETE" "Agent signaled completion" "sequential" "$agent_pid"
         signal="COMPLETE"
         # Let agent finish gracefully
         ;;
       "DEFER")
         printf "\r\033[K" >&2  # Clear spinner line
         echo "⏸️  Rate limit or transient error - deferring for retry..." >&2
+        write_runtime_state "$workspace" "deferred" "$iteration" "$MODEL" "DEFER" "Transient error deferred" "sequential" "$agent_pid"
         signal="DEFER"
         # Stop the agent, will retry with backoff
         stop_process_tree "$agent_pid"
@@ -1338,6 +1416,24 @@ run_iteration() {
   # Cleanup
   rm -f "$fifo"
   
+  case "$signal" in
+    "ROTATE")
+      write_runtime_state "$workspace" "rotating" "$iteration" "$MODEL" "$signal" "Waiting for fresh context" "sequential" ""
+      ;;
+    "GUTTER")
+      write_runtime_state "$workspace" "gutter" "$iteration" "$MODEL" "$signal" "Agent got stuck" "sequential" ""
+      ;;
+    "COMPLETE")
+      write_runtime_state "$workspace" "complete" "$iteration" "$MODEL" "$signal" "Agent finished the task" "sequential" ""
+      ;;
+    "DEFER")
+      write_runtime_state "$workspace" "deferred" "$iteration" "$MODEL" "$signal" "Retrying after transient issue" "sequential" ""
+      ;;
+    *)
+      write_runtime_state "$workspace" "idle" "$iteration" "$MODEL" "NONE" "Session $iteration finished" "sequential" ""
+      ;;
+  esac
+  
   echo "$signal"
 }
 
@@ -1353,6 +1449,8 @@ run_ralph_loop() {
   local script_dir="${2:-$(dirname "${BASH_SOURCE[0]}")}"
 
   acquire_sequential_lock "$workspace" || return 1
+  write_runtime_state "$workspace" "starting" "$(get_iteration "$workspace")" "$MODEL" "NONE" "Loop starting" "loop" ""
+  append_signal_event "$workspace" "LOOP_START" "max_iterations=$MAX_ITERATIONS model=$MODEL" "loop" "$(get_iteration "$workspace")"
   
   # Commit any uncommitted work first
   cd "$workspace"
@@ -1424,6 +1522,8 @@ run_ralph_loop() {
       echo ""
       echo "Completed in $iteration iteration(s)."
       echo "Check git log for detailed history."
+      append_signal_event "$workspace" "LOOP_COMPLETE" "All criteria satisfied" "loop" "$iteration"
+      write_runtime_state "$workspace" "complete" "$iteration" "$MODEL" "COMPLETE" "All criteria satisfied" "loop" ""
       
       # Open PR if requested
       if [[ "$OPEN_PR" == "true" ]] && [[ -n "$USE_BRANCH" ]]; then
@@ -1453,6 +1553,8 @@ run_ralph_loop() {
           echo ""
           echo "Completed in $iteration iteration(s)."
           echo "Check git log for detailed history."
+          append_signal_event "$workspace" "LOOP_COMPLETE" "Agent signaled completion and criteria verified" "loop" "$iteration"
+          write_runtime_state "$workspace" "complete" "$iteration" "$MODEL" "COMPLETE" "Agent signaled completion and criteria verified" "loop" ""
           
           # Open PR if requested
           if [[ "$OPEN_PR" == "true" ]] && [[ -n "$USE_BRANCH" ]]; then
@@ -1470,6 +1572,7 @@ run_ralph_loop() {
         else
           # Agent said complete but checkboxes say otherwise - continue
           log_progress "$workspace" "**Session $iteration ended** - Agent signaled complete but criteria remain"
+          write_runtime_state "$workspace" "running" "$iteration" "$MODEL" "COMPLETE" "Criteria remain after agent completion signal" "loop" ""
           echo ""
           echo "⚠️  Agent signaled completion but unchecked criteria remain."
           echo "   Continuing with next iteration..."
@@ -1478,6 +1581,7 @@ run_ralph_loop() {
         ;;
       "ROTATE")
         log_progress "$workspace" "**Session $iteration ended** - 🔄 Context rotation (token limit reached)"
+        write_runtime_state "$workspace" "rotating" "$iteration" "$MODEL" "ROTATE" "Rotating to fresh context" "loop" ""
         echo ""
         echo "🔄 Rotating to fresh context..."
         iteration=$((iteration + 1))
@@ -1485,6 +1589,8 @@ run_ralph_loop() {
         ;;
       "GUTTER")
         log_progress "$workspace" "**Session $iteration ended** - 🚨 GUTTER (agent stuck)"
+        append_signal_event "$workspace" "GUTTER" "Loop stopped because the agent got stuck" "loop" "$iteration"
+        write_runtime_state "$workspace" "gutter" "$iteration" "$MODEL" "GUTTER" "Loop stopped because the agent got stuck" "loop" ""
         echo ""
         echo "🚨 Gutter detected. Check .ralph/errors.log for details."
         echo "   The agent may be stuck. Consider:"
@@ -1496,6 +1602,8 @@ run_ralph_loop() {
       "THRASH")
         log_progress "$workspace" "**Session $iteration ended** - 🚨 THRASH STOP (repeated rotate-without-progress)"
         log_error "$workspace" "🚨 THRASH STOP: Ralph halted after $thrash_rotation_streak rotate-without-progress iterations"
+        append_signal_event "$workspace" "THRASH" "Loop halted after repeated rotate-without-progress sessions" "loop" "$iteration"
+        write_runtime_state "$workspace" "thrash" "$iteration" "$MODEL" "THRASH" "Loop halted after repeated thrash rotations" "loop" ""
         echo ""
         echo "🚨 Ralph detected repeated large-file reread thrash without meaningful progress."
         echo "   Check .ralph/errors.log for the rotate streak details, tighten the task scope,"
@@ -1505,6 +1613,7 @@ run_ralph_loop() {
       "DEFER")
         # Rate limit or transient error - wait with exponential backoff then retry
         log_progress "$workspace" "**Session $iteration ended** - ⏸️ DEFERRED (rate limit/transient error)"
+        write_runtime_state "$workspace" "deferred" "$iteration" "$MODEL" "DEFER" "Waiting before retry" "loop" ""
         
         # Calculate backoff delay (uses ralph-retry.sh functions if available)
         local defer_delay=30
@@ -1530,6 +1639,7 @@ run_ralph_loop() {
           echo ""
           echo "📋 Agent finished but $remaining_count criteria remaining."
           echo "   Starting next iteration..."
+          write_runtime_state "$workspace" "running" "$iteration" "$MODEL" "NONE" "Preparing next iteration" "loop" ""
           iteration=$((iteration + 1))
         fi
         ;;
@@ -1540,6 +1650,8 @@ run_ralph_loop() {
   done
   
   log_progress "$workspace" "**Loop ended** - ⚠️ Max iterations ($MAX_ITERATIONS) reached"
+  append_signal_event "$workspace" "MAX_ITERATIONS" "Loop ended after $MAX_ITERATIONS iterations" "loop" "$MAX_ITERATIONS"
+  write_runtime_state "$workspace" "idle" "$MAX_ITERATIONS" "$MODEL" "MAX_ITERATIONS" "Max iterations reached" "loop" ""
   echo ""
   echo "⚠️  Max iterations ($MAX_ITERATIONS) reached."
   echo "   Task may not be complete. Check progress manually."
@@ -1589,6 +1701,33 @@ check_prerequisites() {
     return 1
   fi
   
+  return 0
+}
+
+# Check dashboard-specific prerequisites
+check_dashboard_prerequisites() {
+  local script_dir="${1:-$(dirname "${BASH_SOURCE[0]}")}"
+
+  if ! command -v python3 &> /dev/null; then
+    echo "❌ --dashboard requires python3"
+    return 1
+  fi
+
+  if ! python3 - <<'PY' >/dev/null 2>&1
+import importlib.util
+raise SystemExit(0 if importlib.util.find_spec("textual") else 1)
+PY
+  then
+    echo "❌ --dashboard requires the Python 'textual' package"
+    echo "   Install via: python3 -m pip install textual"
+    return 1
+  fi
+
+  if [[ ! -f "$script_dir/ralph-tui.py" ]]; then
+    echo "❌ Dashboard launcher not found: $script_dir/ralph-tui.py"
+    return 1
+  fi
+
   return 0
 }
 

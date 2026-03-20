@@ -21,6 +21,7 @@
 #   --parallel             Run tasks in parallel with worktrees
 #   --max-parallel N       Max parallel agents (default: 3)
 #   --no-merge             Skip auto-merge in parallel mode
+#   --dashboard            Run Ralph inside the fun monitoring dashboard
 #   -y, --yes              Skip confirmation prompt
 #   -h, --help             Show this help
 #
@@ -61,6 +62,7 @@ Options:
   --parallel             Run tasks in parallel with worktrees
   --max-parallel N       Max parallel agents (default: 3)
   --no-merge             Skip auto-merge in parallel mode
+  --dashboard            Run Ralph inside the fun monitoring dashboard
   -y, --yes              Skip confirmation prompt
   -h, --help             Show this help
 
@@ -70,6 +72,7 @@ Examples:
   ./ralph-loop.sh -m gpt-5.2-high                    # Use GPT model
   ./ralph-loop.sh --branch feature/api --pr -y      # Scripted PR workflow
   ./ralph-loop.sh --parallel --max-parallel 4        # Run 4 agents in parallel
+  ./ralph-loop.sh --dashboard -y                     # Launch with live dashboard
   
 Environment:
   RALPH_MODEL            Override default model (same as -m flag)
@@ -82,6 +85,7 @@ EOF
 PARALLEL_MODE=false
 MAX_PARALLEL=3
 SKIP_MERGE=false
+DASHBOARD_MODE=false
 
 # Parse command line arguments
 WORKSPACE=""
@@ -117,6 +121,10 @@ while [[ $# -gt 0 ]]; do
       SKIP_MERGE=true
       shift
       ;;
+    --dashboard)
+      DASHBOARD_MODE=true
+      shift
+      ;;
     -y|--yes)
       SKIP_CONFIRM=true
       shift
@@ -150,6 +158,22 @@ main() {
     WORKSPACE="$(pwd)"
   else
     WORKSPACE="$(cd "$WORKSPACE" && pwd)"
+  fi
+
+  if [[ "$DASHBOARD_MODE" == "true" ]] && [[ "${RALPH_TUI_ACTIVE:-0}" != "1" ]]; then
+    local -a dashboard_args
+    dashboard_args=(-n "$MAX_ITERATIONS" -m "$MODEL" -y)
+    [[ -n "$USE_BRANCH" ]] && dashboard_args+=(--branch "$USE_BRANCH")
+    [[ "$OPEN_PR" == "true" ]] && dashboard_args+=(--pr)
+    if [[ "$PARALLEL_MODE" == "true" ]]; then
+      dashboard_args+=(--parallel --max-parallel "$MAX_PARALLEL")
+    fi
+    [[ "$SKIP_MERGE" == "true" ]] && dashboard_args+=(--no-merge)
+    dashboard_args+=("$WORKSPACE")
+    if ! check_dashboard_prerequisites "$SCRIPT_DIR"; then
+      exit 1
+    fi
+    exec "$SCRIPT_DIR/ralph-tui.py" loop --workspace "$WORKSPACE" -- "${dashboard_args[@]}"
   fi
   
   local task_file="$WORKSPACE/RALPH_TASK.md"

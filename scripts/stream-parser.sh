@@ -21,13 +21,14 @@ set -euo pipefail
 
 WORKSPACE="${1:-.}"
 RALPH_DIR="$WORKSPACE/.ralph"
+SIGNALS_LOG="$RALPH_DIR/signals.log"
 
 # Ensure .ralph directory exists
 mkdir -p "$RALPH_DIR"
 
 # Thresholds
-WARN_THRESHOLD=170000
-ROTATE_THRESHOLD=200000
+WARN_THRESHOLD="${WARN_THRESHOLD:-170000}"
+ROTATE_THRESHOLD="${ROTATE_THRESHOLD:-200000}"
 LARGE_READ_THRESHOLD_BYTES="${LARGE_READ_THRESHOLD_BYTES:-81920}"
 VERY_LARGE_READ_THRESHOLD_BYTES="${VERY_LARGE_READ_THRESHOLD_BYTES:-262144}"
 MAX_LARGE_REREADS_PER_FILE="${MAX_LARGE_REREADS_PER_FILE:-3}"
@@ -83,6 +84,21 @@ calc_tokens() {
   echo $((total_bytes / 4))
 }
 
+log_signal_event() {
+  local signal="$1"
+  local detail="${2:-}"
+  local timestamp
+  timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+
+  if [[ -n "$detail" ]]; then
+    printf '[%s] source=parser iteration=%s signal=%s model=%s | %s\n' \
+      "$timestamp" "${RALPH_ITERATION:-?}" "$signal" "${RALPH_MODEL_RUNTIME:-unknown}" "$detail" >> "$SIGNALS_LOG"
+  else
+    printf '[%s] source=parser iteration=%s signal=%s model=%s\n' \
+      "$timestamp" "${RALPH_ITERATION:-?}" "$signal" "${RALPH_MODEL_RUNTIME:-unknown}" >> "$SIGNALS_LOG"
+  fi
+}
+
 emit_signal_once() {
   local signal="$1"
   local activity_message="${2:-}"
@@ -126,6 +142,7 @@ emit_signal_once() {
   fi
 
   LAST_SIGNAL="$signal"
+  log_signal_event "$signal" "${activity_message:-$error_message}"
   write_session_metrics
   echo "$signal" 2>/dev/null || true
 }
@@ -217,6 +234,7 @@ check_gutter() {
   # Check warning threshold (only emit once per session)
   if [[ $tokens -ge $WARN_THRESHOLD ]] && [[ $WARN_SENT -eq 0 ]]; then
     log_activity "WARN: Approaching token limit ($tokens >= $WARN_THRESHOLD)"
+    log_signal_event "WARN" "Approaching token limit ($tokens >= $WARN_THRESHOLD)"
     WARN_SENT=1
     echo "WARN" 2>/dev/null || true
   fi
