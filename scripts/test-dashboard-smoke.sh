@@ -102,6 +102,16 @@ assert_contains() {
   fi
 }
 
+assert_not_contains() {
+  local file="$1"
+  local pattern="$2"
+
+  if grep -Fq -- "$pattern" "$file"; then
+    echo "Assertion failed: did not expect '$pattern' in $file" >&2
+    exit 1
+  fi
+}
+
 run_parser_case() {
   local name="$1"
   local expected_signal="$2"
@@ -181,7 +191,7 @@ run_auto_model_case() {
   cat > "$fakebin/cursor-agent" <<'EOF'
 #!/bin/bash
 printf '%s\n' "$@" > "$TEST_ARG_FILE"
-printf '%s\n' '{"type":"system","subtype":"init","model":"cursor-default","session_id":"cursor-session-auto","permissionMode":"default"}'
+printf '%s\n' '{"type":"system","subtype":"init","model":"Auto","session_id":"cursor-session-auto","permissionMode":"default"}'
 printf '%s\n' '{"type":"assistant","message":{"content":[{"text":"<ralph>COMPLETE</ralph>"}]}}'
 printf '%s\n' '{"type":"result","subtype":"success","result":"OK","session_id":"cursor-session-auto","request_id":"request-auto-123"}'
 EOF
@@ -199,23 +209,23 @@ EOF
     [[ "$signal" == "COMPLETE" ]]
   ) 2>"$workspace/run.stderr"
 
-  if grep -qx -- '--model' "$workspace/agent-args.txt"; then
-    echo "Assertion failed: MODEL=auto should not pass --model to cursor-agent" >&2
+  if ! grep -qx -- '--model' "$workspace/agent-args.txt"; then
+    echo "Assertion failed: MODEL=auto must pass --model to cursor-agent" >&2
     exit 1
   fi
-  if grep -qx -- 'auto' "$workspace/agent-args.txt"; then
-    echo "Assertion failed: MODEL=auto should not be forwarded literally" >&2
+  if ! grep -qx -- 'auto' "$workspace/agent-args.txt"; then
+    echo "Assertion failed: MODEL=auto must be forwarded literally" >&2
     exit 1
   fi
   assert_contains "$workspace/.ralph/.last-session.env" "RALPH_SESSION_ID=cursor-session-auto"
   assert_contains "$workspace/.ralph/.last-session.env" "RALPH_SESSION_REQUEST_ID=request-auto-123"
   assert_contains "$workspace/.ralph/.last-session.env" "RALPH_SESSION_PERMISSION_MODE=default"
-  assert_contains "$workspace/.ralph/runtime.env" "RALPH_RUNTIME_MODEL=cursor-default"
+  assert_contains "$workspace/.ralph/runtime.env" "RALPH_RUNTIME_MODEL=auto"
   assert_contains "$workspace/.ralph/signals.log" "signal=SESSION_REQUESTED | model_request=auto"
-  assert_contains "$workspace/.ralph/signals.log" "signal=SESSION_START model=cursor-default | session=cursor-session-auto permission=default requested_model=auto"
+  assert_contains "$workspace/.ralph/signals.log" "signal=SESSION_START model=auto | session=cursor-session-auto permission=default"
   assert_contains "$workspace/.ralph/activity.log" "SESSION END: 0ms"
   assert_contains "$workspace/run.stderr" "Model:     auto (Cursor will resolve)"
-  assert_contains "$workspace/run.stderr" "Cursor resolved model: cursor-default"
+  assert_not_contains "$workspace/run.stderr" "Cursor resolved model:"
 }
 
 run_live_abort_case() {
@@ -226,7 +236,7 @@ run_live_abort_case() {
 
   cat > "$fakebin/cursor-agent" <<'EOF'
 #!/bin/bash
-printf '%s\n' '{"type":"system","subtype":"init","model":"cursor-default","session_id":"cursor-session-abort","permissionMode":"default"}'
+printf '%s\n' '{"type":"system","subtype":"init","model":"Auto","session_id":"cursor-session-abort","permissionMode":"default"}'
 printf '%s\n' '{"type":"error","error":{"message":"Permission denied for model"}}'
 exit 0
 EOF
@@ -246,6 +256,35 @@ EOF
   assert_contains "$workspace/.ralph/runtime.env" "RALPH_RUNTIME_STATUS=error"
   assert_contains "$workspace/.ralph/runtime.env" "RALPH_RUNTIME_LAST_SIGNAL=ABORT"
   assert_contains "$workspace/.ralph/signals.log" "signal=ABORT"
+}
+
+run_auto_policy_violation_case() {
+  local workspace fakebin signal
+  workspace="$(make_workspace)"
+  fakebin="$workspace/fakebin"
+  mkdir -p "$fakebin"
+
+  cat > "$fakebin/cursor-agent" <<'EOF'
+#!/bin/bash
+printf '%s\n' '{"type":"system","subtype":"init","model":"Opus 4.6 1M Thinking","session_id":"cursor-session-opus","permissionMode":"default"}'
+exit 0
+EOF
+  chmod +x "$fakebin/cursor-agent"
+
+  (
+    export PATH="$fakebin:$PATH"
+    export MODEL=auto
+    export SCRIPT_DIR="$REPO_DIR/scripts"
+    # shellcheck disable=SC1090
+    source "$REPO_DIR/scripts/ralph-common.sh"
+    init_ralph_dir "$workspace"
+    signal="$(run_iteration "$workspace" 1 "$REPO_DIR/scripts")"
+    [[ "$signal" == "ABORT" ]]
+  ) >/dev/null 2>"$workspace/run.stderr"
+
+  assert_contains "$workspace/.ralph/errors.log" "MODEL POLICY VIOLATION: requested auto but Cursor started Opus 4.6 1M Thinking"
+  assert_contains "$workspace/.ralph/signals.log" "signal=ABORT model=Opus 4.6 1M Thinking"
+  assert_contains "$workspace/run.stderr" "MODEL POLICY VIOLATION: requested auto but Cursor started Opus 4.6 1M Thinking"
 }
 
 run_signal_timeline_case() {
@@ -303,6 +342,19 @@ run_navigation_brief_case() {
   git -C "$workspace" init -q
   mkdir -p "$workspace/src"
 
+  cat > "$workspace/RALPH_TASK.md" <<'EOF'
+---
+task: Monster search
+test_command: "true"
+---
+
+# Task
+
+## Success Criteria
+
+1. [ ] Update parse thing render flow
+EOF
+
   {
     echo "import { z } from 'zod'"
     echo ""
@@ -347,11 +399,18 @@ run_navigation_brief_case() {
 
   assert_contains "$workspace/.ralph/navigation-brief.md" "Forced narrow mode: ACTIVE"
   assert_contains "$workspace/.ralph/navigation-brief.md" "Current hot file: src/monster.ts"
+  assert_contains "$workspace/.ralph/navigation-brief.md" "## Search-First Workflow"
+  assert_contains "$workspace/.ralph/navigation-brief.md" "rg --files . | rg -i"
+  assert_contains "$workspace/.ralph/navigation-brief.md" "## Task Keyword Hits"
+  assert_contains "$workspace/.ralph/navigation-brief.md" "bounded read:"
   assert_contains "$workspace/.ralph/navigation-brief.md" "sed -n"
   assert_contains "$workspace/.ralph/session-brief.md" "## Forced Narrow Mode"
+  assert_contains "$workspace/.ralph/session-brief.md" "## Targeted Read Workflow"
   assert_contains "$workspace/.ralph/session-brief.md" ".ralph/navigation-brief.md"
   assert_contains "$workspace/prompt.txt" ".ralph/navigation-brief.md"
   assert_contains "$workspace/prompt.txt" "forced narrow mode"
+  assert_contains "$workspace/prompt.txt" "rg --files | rg -i 'keyword'"
+  assert_contains "$workspace/prompt.txt" "bounded window (40-120 lines)"
 }
 
 run_dashboard_state_logic_case() {
@@ -474,6 +533,7 @@ PY
 
   run_auto_model_case
   run_live_abort_case
+  run_auto_policy_violation_case
   run_stop_helper_case
   run_parser_session_metadata_case
   run_navigation_brief_case

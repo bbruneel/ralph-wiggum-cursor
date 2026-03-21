@@ -51,6 +51,9 @@ READ_TRACE_RECENT_LIMIT="${READ_TRACE_RECENT_LIMIT:-200}"
 READ_HOTSPOT_LIMIT="${READ_HOTSPOT_LIMIT:-5}"
 NAVIGATION_ANCHOR_LIMIT="${NAVIGATION_ANCHOR_LIMIT:-12}"
 NAVIGATION_WINDOW_RADIUS="${NAVIGATION_WINDOW_RADIUS:-40}"
+TASK_KEYWORD_LIMIT="${TASK_KEYWORD_LIMIT:-6}"
+TASK_SEARCH_HIT_LIMIT="${TASK_SEARCH_HIT_LIMIT:-6}"
+TARGETED_READ_WINDOW_GUIDE="${TARGETED_READ_WINDOW_GUIDE:-40-120 lines}"
 
 # Sequential run locking
 SEQUENTIAL_LOCK_DIR="${SEQUENTIAL_LOCK_DIR:-.ralph/locks/sequential.lock}"
@@ -143,6 +146,25 @@ get_health_emoji() {
 # Get current git HEAD if available
 get_git_head() {
   git rev-parse HEAD 2>/dev/null || echo ""
+}
+
+normalize_model_name() {
+  local model="${1:-}"
+  printf '%s' "$model" | tr '[:upper:]' '[:lower:]'
+}
+
+require_auto_model() {
+  local requested_model="${1:-${MODEL:-$DEFAULT_MODEL}}"
+  local normalized_model
+  normalized_model=$(normalize_model_name "$requested_model")
+
+  if [[ "$normalized_model" != "auto" ]]; then
+    echo "❌ Ralph is locked to Cursor CLI auto mode only. Refusing model: $requested_model" >&2
+    return 1
+  fi
+
+  MODEL="auto"
+  return 0
 }
 
 # Read parser-produced session metrics into namespaced shell variables
@@ -567,6 +589,142 @@ list_navigation_anchors() {
   fi
 }
 
+extract_task_search_keywords() {
+  local text="$1"
+  local limit="${2:-$TASK_KEYWORD_LIMIT}"
+
+  [[ -n "$text" ]] || return 0
+
+  printf '%s\n' "$text" \
+    | tr '[:upper:]' '[:lower:]' \
+    | sed -E 's/[^[:alnum:]_[:space:]\/.-]+/ /g; s#[/_.-]# #g' \
+    | awk -v limit="$limit" '
+      BEGIN {
+        split("a an and are around before behind being but by can closer complete completed concrete criteria criterion current do exact file files first focus for from have if immediate immediately in into is it its just keep last make move next of on only or recent relevant same should start stay task tasks test tests that the their then there these they this through to until up use when with without work writes writing after any all already also another as at because been both code describe expand follow give guide more most not once one open pick read reading reads record retry session slice stuck target targets them unknown update using while whole you your", raw_stop, " ")
+        for (i in raw_stop) {
+          stop[raw_stop[i]] = 1
+        }
+        allow["api"] = 1
+        allow["cpu"] = 1
+        allow["fps"] = 1
+        allow["gpu"] = 1
+        allow["lod"] = 1
+        allow["nav"] = 1
+        allow["ui"] = 1
+        allow["vfx"] = 1
+      }
+      {
+        for (i = 1; i <= NF; i++) {
+          word = $i
+          gsub(/^_+|_+$/, "", word)
+          if (word == "") {
+            continue
+          }
+          if (!(word in allow) && length(word) < 4) {
+            continue
+          }
+          if (word in stop) {
+            continue
+          }
+          if (!seen[word]++) {
+            print word
+            count++
+            if (count >= limit) {
+              exit
+            }
+          }
+        }
+      }
+    '
+}
+
+build_task_search_pattern() {
+  local keywords="$1"
+  local pattern=""
+  local keyword
+
+  while IFS= read -r keyword; do
+    [[ -n "$keyword" ]] || continue
+    if [[ -n "$pattern" ]]; then
+      pattern="${pattern}|${keyword}"
+    else
+      pattern="$keyword"
+    fi
+  done <<< "$keywords"
+
+  printf '%s\n' "$pattern"
+}
+
+search_keyword_hits() {
+  local workspace="$1"
+  local search_root="$2"
+  local pattern="$3"
+  local limit="${4:-$TASK_SEARCH_HIT_LIMIT}"
+
+  [[ -n "$pattern" ]] || return 0
+  [[ -e "$search_root" ]] || return 0
+
+  if command -v rg >/dev/null 2>&1; then
+    rg -n -i \
+      --glob '!.git/**' \
+      --glob '!.ralph/**' \
+      --glob '!node_modules/**' \
+      --glob '!vendor/**' \
+      --glob '!vendors/**' \
+      --glob '!third_party/**' \
+      --glob '!third-party/**' \
+      --glob '!dist/**' \
+      --glob '!build/**' \
+      --glob '!coverage/**' \
+      --glob '!.next/**' \
+      --glob '!target/**' \
+      --glob '!test-results/**' \
+      --glob '!*.min.js' \
+      --glob '!*.min.css' \
+      --glob '!*.min.mjs' \
+      -e "$pattern" "$search_root" 2>/dev/null
+  else
+    grep -RniE \
+      --exclude-dir=.git \
+      --exclude-dir=.ralph \
+      --exclude-dir=node_modules \
+      --exclude-dir=vendor \
+      --exclude-dir=vendors \
+      --exclude-dir=third_party \
+      --exclude-dir=third-party \
+      --exclude-dir=dist \
+      --exclude-dir=build \
+      --exclude-dir=coverage \
+      --exclude-dir=.next \
+      --exclude-dir=target \
+      --exclude-dir=test-results \
+      --exclude='*.min.js' \
+      --exclude='*.min.css' \
+      --exclude='*.min.mjs' \
+      "$pattern" "$search_root" 2>/dev/null
+  fi | awk -F ':' -v ws="$workspace/" '
+    {
+      file = $1
+      line = $2
+      if (!(line ~ /^[0-9]+$/)) {
+        next
+      }
+      snippet = $0
+      sub(/^[^:]+:[0-9]+:/, "", snippet)
+      gsub(/[[:space:]]+/, " ", snippet)
+      sub(/^ +/, "", snippet)
+      sub(/ +$/, "", snippet)
+      if (ws != "" && index(file, ws) == 1) {
+        file = substr(file, length(ws) + 1)
+      }
+      key = file ":" line
+      if (!seen[key]++) {
+        printf "%s\t%s\t%s\n", file, line, substr(snippet, 1, 120)
+      }
+    }
+  ' | sed -n "1,${limit}p"
+}
+
 clamp_navigation_window() {
   local total_lines="$1"
   local center_line="$2"
@@ -666,7 +824,7 @@ list_task_descriptions() {
       ;;
   esac
 
-  grep -E "$pattern" "$task_file" 2>/dev/null \
+  { grep -E "$pattern" "$task_file" 2>/dev/null || true; } \
     | sed -E 's/^[[:space:]]*([-*]|[0-9]+\.)[[:space:]]+\[[xX ]\][[:space:]]+//' \
     | sed -E 's/[[:space:]]*<!--[[:space:]]*group:[[:space:]]*[0-9]+[[:space:]]*-->[[:space:]]*$//'
 }
@@ -811,6 +969,8 @@ write_navigation_brief() {
   local brief_file="$workspace/.ralph/navigation-brief.md"
   local tmp_file hotspot_summary target_path target_file quoted_target
   local recent_target_reads anchors
+  local next_task next_id next_status next_desc=""
+  local task_keywords task_pattern repo_keyword_hits target_keyword_hits
   local forced_narrow=0
   local target_exists=0
   local target_lines=0
@@ -818,6 +978,12 @@ write_navigation_brief() {
 
   hotspot_summary=$(summarize_recent_read_hotspots "$workspace" "$READ_HOTSPOT_LIMIT")
   target_path=$(resolve_navigation_target "$workspace")
+  next_task=$(get_next_task_info "$workspace")
+  if [[ -n "$next_task" ]]; then
+    IFS='|' read -r next_id next_status next_desc <<< "$next_task"
+  fi
+  task_keywords=$(extract_task_search_keywords "$next_desc" "$TASK_KEYWORD_LIMIT")
+  task_pattern=$(build_task_search_pattern "$task_keywords")
 
   if should_force_narrow_mode "$workspace"; then
     forced_narrow=1
@@ -837,9 +1003,21 @@ write_navigation_brief() {
     target_bytes=$(get_file_size_bytes "$target_file")
     anchors=$(list_navigation_anchors "$target_file" "$NAVIGATION_ANCHOR_LIMIT")
     recent_target_reads=$(recent_file_read_trace "$workspace" "$target_path" 6)
+    if [[ -n "$task_pattern" ]]; then
+      target_keyword_hits=$(search_keyword_hits "$workspace" "$target_file" "$task_pattern" 4)
+    else
+      target_keyword_hits=""
+    fi
   else
     anchors=""
     recent_target_reads=""
+    target_keyword_hits=""
+  fi
+
+  if [[ -n "$task_pattern" ]]; then
+    repo_keyword_hits=$(search_keyword_hits "$workspace" "$workspace" "$task_pattern" "$TASK_SEARCH_HIT_LIMIT")
+  else
+    repo_keyword_hits=""
   fi
 
   tmp_file=$(mktemp)
@@ -871,6 +1049,8 @@ write_navigation_brief() {
       else
         echo "- Do not full-read any hotspot file until you have narrowed to a symbol or line window."
       fi
+      echo "- Shortlist candidate files with \`rg --files | rg -i 'keyword'\` or \`find . -path '*keyword*'\` before opening unfamiliar code."
+      echo "- Search inside shortlisted files with \`rg -n\`, then read a bounded window (${TARGETED_READ_WINDOW_GUIDE}) with \`sed -n 'start,endp'\`."
       echo "- Start with one command from the recommended list below."
       echo "- After one or two narrow reads, either make a concrete edit/test change or record the next exact slice in \`.ralph/progress.md\`."
     else
@@ -899,6 +1079,21 @@ write_navigation_brief() {
     } >> "$tmp_file"
   fi
 
+  if [[ -n "$task_pattern" ]]; then
+    {
+      echo "## Search-First Workflow"
+      echo ""
+      if [[ -n "$next_desc" ]]; then
+        echo "- Next criterion: $next_desc"
+      fi
+      echo "- Search pattern: \`$task_pattern\`"
+      echo "- Shortlist candidates: \`rg --files . | rg -i '$task_pattern'\`"
+      echo "- Search inside candidates: \`rg -n -i '$task_pattern' .\`"
+      echo "- After a hit, read one bounded window (${TARGETED_READ_WINDOW_GUIDE}) with \`sed -n 'start,endp' path\`."
+      echo ""
+    } >> "$tmp_file"
+  fi
+
   if [[ -n "$target_path" ]]; then
     {
       echo "## Target Snapshot"
@@ -912,6 +1107,26 @@ write_navigation_brief() {
       else
         echo "- Status: file not present in the current working tree. Use the hotspot list and task brief to pick a different narrow read."
       fi
+      echo ""
+    } >> "$tmp_file"
+  fi
+
+  if [[ -n "$repo_keyword_hits" ]]; then
+    {
+      echo "## Task Keyword Hits"
+      echo ""
+      while IFS=$'\t' read -r hit_path hit_line hit_snippet; do
+        local hit_file hit_lines hit_window start_line end_line quoted_hit_path
+        [[ -n "$hit_path" ]] || continue
+        hit_file=$(workspace_path_to_file "$workspace" "$hit_path")
+        [[ -f "$hit_file" ]] || continue
+        hit_lines=$(get_file_line_count "$hit_file")
+        hit_window=$(clamp_navigation_window "$hit_lines" "$hit_line" "$NAVIGATION_WINDOW_RADIUS")
+        start_line="${hit_window%%:*}"
+        end_line="${hit_window##*:}"
+        quoted_hit_path=$(printf '%q' "$hit_path")
+        echo "- $hit_path:$hit_line -> $hit_snippet | bounded read: \`sed -n '${start_line},${end_line}p' $quoted_hit_path\`"
+      done <<< "$repo_keyword_hits"
       echo ""
     } >> "$tmp_file"
   fi
@@ -939,6 +1154,14 @@ write_navigation_brief() {
   {
     echo "## Recommended Commands"
     echo ""
+    if [[ -n "$task_pattern" ]]; then
+      echo "- \`rg --files . | rg -i '$task_pattern'\`"
+      if [[ -n "$target_path" ]]; then
+        echo "- \`rg -n -i '$task_pattern' $quoted_target\`"
+      else
+        echo "- \`rg -n -i '$task_pattern' .\`"
+      fi
+    fi
     if [[ -n "$target_path" ]]; then
       echo "- \`wc -l $quoted_target\`"
       echo "- \`rg -n 'function|class|interface|type|def|fn|describe\\(|test\\(' $quoted_target\`"
@@ -950,6 +1173,25 @@ write_navigation_brief() {
   if [[ "$target_exists" -eq 1 ]]; then
     local shown_windows=0
     local used_windows=""
+
+    if [[ -n "$target_keyword_hits" ]]; then
+      while IFS=$'\t' read -r hit_path hit_line hit_snippet; do
+        local window start_line end_line
+        [[ "$hit_line" =~ ^[0-9]+$ ]] || continue
+        window=$(clamp_navigation_window "$target_lines" "$hit_line" "$NAVIGATION_WINDOW_RADIUS")
+        case " $used_windows " in
+          *" $window "*) continue ;;
+        esac
+        used_windows="$used_windows $window"
+        start_line="${window%%:*}"
+        end_line="${window##*:}"
+        echo "- lines ${start_line}-${end_line}: \`sed -n '${start_line},${end_line}p' $quoted_target\` # keyword hit near line ${hit_line}" >> "$tmp_file"
+        shown_windows=$((shown_windows + 1))
+        if [[ "$shown_windows" -ge 3 ]]; then
+          break
+        fi
+      done <<< "$target_keyword_hits"
+    fi
 
     if [[ -n "$anchors" ]]; then
       while IFS= read -r anchor; do
@@ -1076,7 +1318,7 @@ write_session_brief() {
   pending_sample=$(sample_task_descriptions "$workspace" pending 5)
   completed_sample=$(list_task_descriptions "$workspace" completed 2>/dev/null | tail -n 4)
   dirty_files=$(git -C "$workspace" status --short --untracked-files=all 2>/dev/null | sed -n "1,${SESSION_BRIEF_MAX_DIRTY_FILES}p")
-  recent_errors=$(grep -vE '^(#|>|$)' "$workspace/.ralph/errors.log" 2>/dev/null | tail -n "$SESSION_BRIEF_MAX_ERROR_LINES")
+  recent_errors=$({ grep -vE '^(#|>|$)' "$workspace/.ralph/errors.log" 2>/dev/null || true; } | tail -n "$SESSION_BRIEF_MAX_ERROR_LINES")
   large_files=$(list_large_context_files "$workspace")
   hotspot_summary=$(summarize_recent_read_hotspots "$workspace" "$READ_HOTSPOT_LIMIT")
   navigation_target=$(resolve_navigation_target "$workspace")
@@ -1124,6 +1366,9 @@ write_session_brief() {
     echo "## Hard Rules"
     echo ""
     echo "- Do not full-read \`.ralph/progress.md\` if the carried-forward notes here already answer your question."
+    echo "- Start discovery with \`rg --files | rg\`, \`find . -path\`, or another shortlist command before opening unfamiliar code."
+    echo "- Search inside shortlisted files with \`rg -n\`, then read one bounded window (${TARGETED_READ_WINDOW_GUIDE}) with \`sed -n 'start,endp'\`."
+    echo "- If keyword search is noisy, tighten the regex or directory before opening more files."
     echo "- If \`.ralph/navigation-brief.md\` names a hot file, follow its recommended commands before any direct reread."
     echo "- Do not full-read files listed under \"Large Files To Slice First\" until you have narrowed to a symbol or line range."
     echo "- If you reread the same huge file twice before writing code, you are stuck: switch to \`rg -n\` / \`sed -n\` or move on."
@@ -1139,9 +1384,19 @@ write_session_brief() {
       else
         echo "- Read \`.ralph/navigation-brief.md\` before opening any hotspot file."
       fi
+      echo "- Keep exploration to one or two searches plus one bounded read window before you either edit, test, or record the next slice."
       echo "- After one or two narrow reads, either make a concrete edit/test change or record the next exact slice in \`.ralph/progress.md\`."
       echo ""
     fi
+
+    echo "## Targeted Read Workflow"
+    echo ""
+    echo "- Derive search words from the next criterion, a failing test name, an error string, or the symbol you need to change."
+    echo "- Shortlist candidate files first with \`rg --files | rg -i 'keyword'\` or \`find . -path '*keyword*'\`."
+    echo "- Search inside those files with \`rg -n -i 'keyword' path...\` before reading anything large."
+    echo "- Read one bounded window at a time (${TARGETED_READ_WINDOW_GUIDE}) with \`sed -n 'start,endp' path\`."
+    echo "- If the hit set is still broad, tighten the search instead of opening another large file."
+    echo ""
 
     echo "## Immediate Focus"
     echo ""
@@ -1562,6 +1817,11 @@ EOF
 - **Instruction**: Always read the existing file first
 - **Added after**: Core principle
 
+### Sign: Search Before Large Read
+- **Trigger**: Before opening a large or unfamiliar file
+- **Instruction**: Shortlist files with `rg --files | rg` or `find`, search inside them with `rg -n`, then read one bounded window with `sed -n`
+- **Added after**: Core principle
+
 ### Sign: Test After Changes
 - **Trigger**: After any code change
 - **Instruction**: Run tests to verify nothing broke
@@ -1620,6 +1880,7 @@ EOF
 - Criteria: 0 / 0 complete
 - Next unchecked criterion: unknown
 - Read strategy: open the relevant slice of `RALPH_TASK.md`, not the whole repo.
+- Discovery strategy: shortlist files with `rg --files | rg` or `find`, then `rg -n`, then bounded `sed -n` windows.
 
 EOF
   fi
@@ -1634,6 +1895,7 @@ EOF
 - Last session signal: NONE
 - Forced narrow mode: standby
 - Current hot file: not yet identified
+- Search-first workflow: shortlist files, grep for task words, then read one bounded slice at a time.
 
 EOF
   fi
@@ -1801,7 +2063,9 @@ build_prompt() {
   local workspace="$1"
   local iteration="$2"
 
-  cat <<'EOF' | sed "s/__RALPH_ITERATION__/$iteration/g"
+  cat <<'EOF' | sed \
+    -e "s/__RALPH_ITERATION__/$iteration/g" \
+    -e "s/__TARGETED_READ_WINDOW_GUIDE__/$TARGETED_READ_WINDOW_GUIDE/g"
 # Ralph Iteration __RALPH_ITERATION__
 
 You are an autonomous development agent using the Ralph methodology.
@@ -1857,6 +2121,11 @@ If you get rotated, the next agent picks up from your last commit. Your commits 
 
 ## Context Discipline (Critical)
 
+- Start discovery by shortlisting candidate files with \`rg --files | rg -i 'keyword'\`, \`find . -path '*keyword*'\`, or a similarly narrow file search
+- Derive those keywords from the next criterion, a failing test name, the nearest error string, or the symbol you need to change
+- Search inside shortlisted files with \`rg -n -i 'keyword' path...\` before opening them
+- After a search hit, read only one bounded window (__TARGETED_READ_WINDOW_GUIDE__) with \`sed -n 'start,endp' path\`
+- If a search is noisy, tighten the regex or directory scope instead of opening more files
 - Before full-reading any file larger than roughly 80KB or 800 lines, narrow first with \`rg -n\`, \`git diff --name-only\`, \`wc -l\`, or \`sed -n 'start,endp'\`
 - If \`.ralph/navigation-brief.md\` names a hot file, use its recommended commands before any direct reread
 - If a file is listed under "Large Files To Slice First" in the brief, treat full reads as a last resort
@@ -1920,6 +2189,7 @@ run_iteration() {
   local iteration="$2"
   local script_dir="${3:-$(dirname "${BASH_SOURCE[0]}")}"
 
+  require_auto_model "$MODEL" || return 1
   auto_rotate_ralph_logs_if_needed "$workspace"
   load_last_session_metrics "$workspace"
   write_navigation_brief "$workspace"
@@ -1953,7 +2223,7 @@ run_iteration() {
   # Build cursor-agent command
   local -a agent_cmd
   agent_cmd=(cursor-agent -p --force --output-format stream-json)
-  if [[ -n "${MODEL:-}" ]] && [[ "$MODEL" != "auto" ]]; then
+  if [[ -n "${MODEL:-}" ]]; then
     agent_cmd+=(--model "$MODEL")
   fi
 
@@ -2092,6 +2362,7 @@ run_ralph_loop() {
   local workspace="$1"
   local script_dir="${2:-$(dirname "${BASH_SOURCE[0]}")}"
 
+  require_auto_model "$MODEL" || return 1
   acquire_sequential_lock "$workspace" || return 1
   write_runtime_state "$workspace" "starting" "$(get_iteration "$workspace")" "$MODEL" "NONE" "Loop starting" "loop" ""
   append_signal_event "$workspace" "LOOP_START" "max_iterations=$MAX_ITERATIONS model=$MODEL" "loop" "$(get_iteration "$workspace")"

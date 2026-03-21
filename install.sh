@@ -175,6 +175,11 @@ write_file_if_missing .ralph/guardrails.md << 'EOF'
 - **Instruction**: Always read the existing file first
 - **Added after**: Core principle
 
+### Sign: Search Before Large Read
+- **Trigger**: Before opening a large or unfamiliar file
+- **Instruction**: Shortlist files with `rg --files | rg` or `find`, search inside them with `rg -n`, then read one bounded window with `sed -n`
+- **Added after**: Core principle
+
 ### Sign: Test After Changes
 - **Trigger**: After any code change
 - **Instruction**: Run tests to verify nothing broke
@@ -243,6 +248,7 @@ write_file_if_missing .ralph/session-brief.md << 'EOF'
 - Criteria: 0 / 0 complete
 - Next unchecked criterion: unknown
 - Read strategy: open the relevant slice of `RALPH_TASK.md`, not the whole repo.
+- Discovery strategy: shortlist files with `rg --files | rg` or `find`, then `rg -n`, then bounded `sed -n` windows.
 
 EOF
 
@@ -255,6 +261,7 @@ write_file_if_missing .ralph/navigation-brief.md << 'EOF'
 - Last session signal: NONE
 - Forced narrow mode: standby
 - Current hot file: not yet identified
+- Search-first workflow: shortlist files, grep for task words, then read one bounded slice at a time.
 
 EOF
 
