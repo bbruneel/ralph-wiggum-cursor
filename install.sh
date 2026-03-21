@@ -275,6 +275,10 @@ write_file_if_missing .ralph/read-trace.tsv << 'EOF'
 timestamp	iteration	path	bytes	lines	per_file_reads	write_calls_before_read	thrash_hit
 EOF
 
+write_file_if_missing .ralph/shell-edit-trace.tsv << 'EOF'
+timestamp	iteration	exit_code	status	path	before_bytes	after_bytes	work_path	command
+EOF
+
 write_file_if_missing .ralph/runtime.env << 'EOF'
 # Ralph runtime state
 RALPH_RUNTIME_STATUS=idle

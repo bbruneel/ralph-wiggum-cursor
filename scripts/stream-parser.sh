@@ -23,11 +23,15 @@ WORKSPACE="${1:-.}"
 RALPH_DIR="$WORKSPACE/.ralph"
 SIGNALS_LOG="$RALPH_DIR/signals.log"
 READ_TRACE_FILE="$RALPH_DIR/read-trace.tsv"
+SHELL_EDIT_TRACE_FILE="$RALPH_DIR/shell-edit-trace.tsv"
 
 # Ensure .ralph directory exists
 mkdir -p "$RALPH_DIR"
 if [[ ! -f "$READ_TRACE_FILE" ]]; then
   printf 'timestamp\titeration\tpath\tbytes\tlines\tper_file_reads\twrite_calls_before_read\tthrash_hit\n' > "$READ_TRACE_FILE"
+fi
+if [[ ! -f "$SHELL_EDIT_TRACE_FILE" ]]; then
+  printf 'timestamp\titeration\texit_code\tstatus\tpath\tbefore_bytes\tafter_bytes\twork_path\tcommand\n' > "$SHELL_EDIT_TRACE_FILE"
 fi
 
 # Thresholds
@@ -37,6 +41,7 @@ LARGE_READ_THRESHOLD_BYTES="${LARGE_READ_THRESHOLD_BYTES:-81920}"
 VERY_LARGE_READ_THRESHOLD_BYTES="${VERY_LARGE_READ_THRESHOLD_BYTES:-262144}"
 MAX_LARGE_REREADS_PER_FILE="${MAX_LARGE_REREADS_PER_FILE:-3}"
 MAX_LARGE_READS_WITHOUT_WRITE="${MAX_LARGE_READS_WITHOUT_WRITE:-5}"
+SNAPSHOT_CHECKSUM_MAX_BYTES="${SNAPSHOT_CHECKSUM_MAX_BYTES:-1048576}"
 
 # Tracking state
 BYTES_READ=0
@@ -51,6 +56,12 @@ READ_CALLS=0
 WRITE_CALLS=0
 WORK_WRITE_CALLS=0
 SHELL_CALLS=0
+SHELL_EDIT_CALLS=0
+SHELL_WORK_EDIT_CALLS=0
+LAST_SHELL_EDIT_COUNT=0
+LAST_SHELL_WORK_EDIT_SEEN=0
+LAST_SHELL_EDIT_BYTES=0
+LAST_SHELL_EDIT_TOKENS=0
 LARGE_READS=0
 LARGE_READ_REREADS=0
 TERMINAL_SIGNAL_SENT=0
@@ -83,7 +94,9 @@ PROMPT_CHARS=3000
 FAILURES_FILE=$(mktemp)
 WRITES_FILE=$(mktemp)
 READS_FILE=$(mktemp)
-trap "rm -f $FAILURES_FILE $WRITES_FILE $READS_FILE" EXIT
+WORKSPACE_SNAPSHOT_FILE=$(mktemp)
+WORKSPACE_SNAPSHOT_READY=0
+trap "rm -f $FAILURES_FILE $WRITES_FILE $READS_FILE $WORKSPACE_SNAPSHOT_FILE" EXIT
 
 # Get context health emoji
 get_health_emoji() {
@@ -425,11 +438,316 @@ track_file_write() {
   fi
 }
 
+total_mutation_calls() {
+  echo $((WRITE_CALLS + SHELL_EDIT_CALLS))
+}
+
+normalize_workspace_path() {
+  local path="$1"
+
+  if [[ -z "$path" ]]; then
+    return 1
+  fi
+
+  if [[ "$path" == "$WORKSPACE" ]]; then
+    echo "."
+    return 0
+  fi
+
+  if [[ "$path" == "$WORKSPACE/"* ]]; then
+    path="${path#$WORKSPACE/}"
+  elif [[ "$path" == ./* ]]; then
+    path="${path#./}"
+  fi
+
+  if [[ "$path" == /* ]]; then
+    return 1
+  fi
+
+  echo "$path"
+}
+
+should_track_snapshot_path() {
+  local path="$1"
+
+  case "$path" in
+    ""|"."|".git"|".git/"* )
+      return 1
+      ;;
+    ".ralph/activity.log"|".ralph/errors.log"|".ralph/signals.log"|".ralph/.last-session.env"|".ralph/read-trace.tsv"|".ralph/shell-edit-trace.tsv" )
+      return 1
+      ;;
+  esac
+
+  return 0
+}
+
+is_snapshot_extra_path() {
+  local path="$1"
+
+  case "$path" in
+    "RALPH_TASK.md"|".ralph/progress.md"|".ralph/guardrails.md"|".ralph/session-brief.md"|".ralph/navigation-brief.md")
+      return 0
+      ;;
+  esac
+
+  return 1
+}
+
+is_work_path() {
+  local path="$1"
+
+  case "$path" in
+    .ralph/*)
+      return 1
+      ;;
+  esac
+
+  return 0
+}
+
+path_is_snapshot_candidate() {
+  local path="$1"
+
+  should_track_snapshot_path "$path" || return 1
+
+  if is_snapshot_extra_path "$path"; then
+    return 0
+  fi
+
+  (
+    cd "$WORKSPACE" || exit 1
+    git ls-files --error-unmatch -- "$path" >/dev/null 2>&1 || \
+      git ls-files --others --exclude-standard -- "$path" 2>/dev/null | grep -Fxq -- "$path"
+  )
+}
+
+file_stat_signature() {
+  local path="$1"
+
+  if stat -f $'%m\t%z' "$path" >/dev/null 2>&1; then
+    stat -f $'%m\t%z' "$path"
+  else
+    stat -c $'%Y\t%s' "$path"
+  fi
+}
+
+file_snapshot_signature() {
+  local path="$1"
+  local meta mtime size checksum="-"
+
+  meta=$(file_stat_signature "$path" 2>/dev/null) || return 1
+  mtime="${meta%%$'\t'*}"
+  size="${meta##*$'\t'}"
+
+  if [[ "$size" =~ ^[0-9]+$ ]] && [[ "$size" -le "$SNAPSHOT_CHECKSUM_MAX_BYTES" ]]; then
+    checksum=$(cksum < "$path" 2>/dev/null | awk '{print $1 ":" $2}')
+  fi
+
+  printf '%s\t%s\t%s\n' "$mtime" "$size" "$checksum"
+}
+
+list_snapshot_candidates() {
+  (
+    cd "$WORKSPACE" || exit 0
+    git ls-files -z --cached --others --exclude-standard 2>/dev/null || true
+
+    local extra
+    for extra in "RALPH_TASK.md" ".ralph/progress.md" ".ralph/guardrails.md" ".ralph/session-brief.md" ".ralph/navigation-brief.md"; do
+      if [[ -f "$extra" ]]; then
+        printf '%s\0' "$extra"
+      fi
+    done
+  ) | tr '\0' '\n' | awk 'NF && !seen[$0]++ { print $0 }'
+}
+
+snapshot_workspace_state() {
+  local out_file="$1"
+  local tmp_file
+  tmp_file=$(mktemp)
+  : > "$tmp_file"
+
+  while IFS= read -r rel_path; do
+    local abs_path signature
+
+    [[ -n "$rel_path" ]] || continue
+    should_track_snapshot_path "$rel_path" || continue
+
+    abs_path="$WORKSPACE/$rel_path"
+    [[ -f "$abs_path" ]] || continue
+
+    signature=$(file_snapshot_signature "$abs_path") || continue
+    printf '%s\t%s\n' "$rel_path" "$signature" >> "$tmp_file"
+  done < <(list_snapshot_candidates)
+
+  LC_ALL=C sort "$tmp_file" > "$out_file"
+  rm -f "$tmp_file"
+}
+
+ensure_workspace_snapshot() {
+  if [[ "$WORKSPACE_SNAPSHOT_READY" -eq 0 ]]; then
+    snapshot_workspace_state "$WORKSPACE_SNAPSHOT_FILE"
+    WORKSPACE_SNAPSHOT_READY=1
+  fi
+}
+
+update_workspace_snapshot_entry() {
+  local raw_path="$1"
+  local path tmp_file abs_path signature
+
+  path=$(normalize_workspace_path "$raw_path") || return 0
+  path_is_snapshot_candidate "$path" || return 0
+
+  ensure_workspace_snapshot
+
+  tmp_file=$(mktemp)
+  awk -F '\t' -v target="$path" '$1 != target { print }' "$WORKSPACE_SNAPSHOT_FILE" > "$tmp_file"
+
+  abs_path="$WORKSPACE/$path"
+  if [[ -f "$abs_path" ]]; then
+    signature=$(file_snapshot_signature "$abs_path") || signature=""
+    if [[ -n "$signature" ]]; then
+      printf '%s\t%s\n' "$path" "$signature" >> "$tmp_file"
+    fi
+  fi
+
+  LC_ALL=C sort "$tmp_file" -o "$tmp_file"
+  mv "$tmp_file" "$WORKSPACE_SNAPSHOT_FILE"
+}
+
+snapshot_diff_rows() {
+  local before_file="$1"
+  local after_file="$2"
+
+  awk -F '\t' '
+    NR == FNR {
+      before[$1] = $0
+      before_size[$1] = $3
+      next
+    }
+    {
+      after[$1] = $0
+      if (!($1 in before)) {
+        print "created\t" $1 "\t0\t" $3
+      } else if (before[$1] != $0) {
+        print "modified\t" $1 "\t" before_size[$1] "\t" $3
+      }
+      delete before[$1]
+      delete before_size[$1]
+    }
+    END {
+      for (path in before) {
+        print "deleted\t" path "\t" before_size[path] "\t0"
+      }
+    }
+  ' "$before_file" "$after_file" | LC_ALL=C sort
+}
+
+sanitize_trace_field() {
+  printf '%s' "$1" | tr '\t\r\n' '   '
+}
+
+append_shell_edit_trace() {
+  local cmd="$1"
+  local exit_code="$2"
+  local status="$3"
+  local path="$4"
+  local before_bytes="$5"
+  local after_bytes="$6"
+  local work_path_flag="$7"
+  local safe_cmd
+
+  safe_cmd=$(sanitize_trace_field "$cmd")
+
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+    "${RALPH_ITERATION:-0}" \
+    "$exit_code" \
+    "$status" \
+    "$path" \
+    "$before_bytes" \
+    "$after_bytes" \
+    "$work_path_flag" \
+    "$safe_cmd" >> "$SHELL_EDIT_TRACE_FILE"
+}
+
+track_shell_edits() {
+  local cmd="$1"
+  local exit_code="$2"
+  local after_snapshot tmp_diff
+  local edit_count=0
+  local work_edit_seen=0
+  local bytes_changed=0
+  local write_tokens=0
+
+  ensure_workspace_snapshot
+  LAST_SHELL_EDIT_COUNT=0
+  LAST_SHELL_WORK_EDIT_SEEN=0
+  LAST_SHELL_EDIT_BYTES=0
+  LAST_SHELL_EDIT_TOKENS=0
+
+  after_snapshot=$(mktemp)
+  tmp_diff=$(mktemp)
+  snapshot_workspace_state "$after_snapshot"
+  snapshot_diff_rows "$WORKSPACE_SNAPSHOT_FILE" "$after_snapshot" > "$tmp_diff"
+
+  while IFS=$'\t' read -r status path before_bytes after_bytes; do
+    local bytes_for_tokens=0
+    local work_flag=0
+
+    [[ -n "$status" ]] || continue
+    edit_count=$((edit_count + 1))
+
+    if is_work_path "$path"; then
+      work_flag=1
+      work_edit_seen=1
+    fi
+
+    if [[ "$status" == "deleted" ]]; then
+      bytes_for_tokens="$before_bytes"
+    else
+      bytes_for_tokens="$after_bytes"
+    fi
+    [[ "$bytes_for_tokens" =~ ^[0-9]+$ ]] || bytes_for_tokens=0
+    bytes_changed=$((bytes_changed + bytes_for_tokens))
+
+    track_file_write "$path"
+    append_shell_edit_trace "$cmd" "$exit_code" "$status" "$path" "$before_bytes" "$after_bytes" "$work_flag"
+    log_activity "SHELL-EDIT $status $path (${before_bytes}B -> ${after_bytes}B)"
+  done < "$tmp_diff"
+
+  if [[ "$edit_count" -gt 0 ]]; then
+    local estimated_lines=$((bytes_changed / 90))
+    if [[ "$estimated_lines" -lt 1 ]]; then
+      estimated_lines=1
+    fi
+
+    write_tokens=$(estimate_write_tokens "$bytes_changed" "$estimated_lines")
+    BYTES_WRITTEN=$((BYTES_WRITTEN + bytes_changed))
+    TOKEN_EST_WRITE=$((TOKEN_EST_WRITE + write_tokens))
+    SHELL_EDIT_CALLS=$((SHELL_EDIT_CALLS + 1))
+    if [[ "$work_edit_seen" -eq 1 ]]; then
+      SHELL_WORK_EDIT_CALLS=$((SHELL_WORK_EDIT_CALLS + 1))
+    fi
+  fi
+
+  LAST_SHELL_EDIT_COUNT="$edit_count"
+  LAST_SHELL_WORK_EDIT_SEEN="$work_edit_seen"
+  LAST_SHELL_EDIT_BYTES="$bytes_changed"
+  LAST_SHELL_EDIT_TOKENS="$write_tokens"
+
+  mv "$after_snapshot" "$WORKSPACE_SNAPSHOT_FILE"
+  rm -f "$tmp_diff"
+}
+
 track_file_read() {
   local path="$1"
   local bytes="$2"
   local lines="$3"
   local now=$(date +%s)
+  local mutation_calls
+
+  mutation_calls=$(total_mutation_calls)
 
   READ_CALLS=$((READ_CALLS + 1))
   printf '%s\t%s\t%s\t%s\n' "$now" "$path" "$bytes" "$lines" >> "$READS_FILE"
@@ -459,7 +777,7 @@ track_file_read() {
 
   local read_triggered_thrash=0
 
-  if [[ $WRITE_CALLS -eq 0 && $bytes -ge $VERY_LARGE_READ_THRESHOLD_BYTES && $per_file_count -ge 2 ]]; then
+  if [[ $mutation_calls -eq 0 && $bytes -ge $VERY_LARGE_READ_THRESHOLD_BYTES && $per_file_count -ge 2 ]]; then
     LARGE_READ_THRASH_HIT=1
     THRASH_PATH="$path"
     read_triggered_thrash=1
@@ -467,7 +785,7 @@ track_file_read() {
       "GUTTER" \
       "🚨 THRASH: very large file reread of $path (${per_file_count}x before any write)" \
       "⚠️ THRASH: very large file $path reread ${per_file_count}x before any write"
-  elif [[ $WRITE_CALLS -eq 0 && $per_file_count -ge $MAX_LARGE_REREADS_PER_FILE ]]; then
+  elif [[ $mutation_calls -eq 0 && $per_file_count -ge $MAX_LARGE_REREADS_PER_FILE ]]; then
     LARGE_READ_THRASH_HIT=1
     THRASH_PATH="$path"
     read_triggered_thrash=1
@@ -475,7 +793,7 @@ track_file_read() {
       "GUTTER" \
       "🚨 THRASH: repeated large reread of $path (${per_file_count}x before any write)" \
       "⚠️ THRASH: $path reread ${per_file_count}x in one session before any write"
-  elif [[ $WRITE_CALLS -eq 0 && $LARGE_READS -ge $MAX_LARGE_READS_WITHOUT_WRITE ]]; then
+  elif [[ $mutation_calls -eq 0 && $LARGE_READS -ge $MAX_LARGE_READS_WITHOUT_WRITE ]]; then
     LARGE_READ_THRASH_HIT=1
     THRASH_PATH="$path"
     read_triggered_thrash=1
@@ -492,7 +810,7 @@ track_file_read() {
     "$bytes" \
     "$lines" \
     "$per_file_count" \
-    "$WRITE_CALLS" \
+    "$mutation_calls" \
     "$read_triggered_thrash" >> "$READ_TRACE_FILE"
 }
 
@@ -520,6 +838,9 @@ write_session_metrics() {
     printf 'RALPH_SESSION_WRITE_CALLS=%q\n' "$WRITE_CALLS"
     printf 'RALPH_SESSION_WORK_WRITE_CALLS=%q\n' "$WORK_WRITE_CALLS"
     printf 'RALPH_SESSION_SHELL_CALLS=%q\n' "$SHELL_CALLS"
+    printf 'RALPH_SESSION_SHELL_EDIT_CALLS=%q\n' "$SHELL_EDIT_CALLS"
+    printf 'RALPH_SESSION_SHELL_WORK_EDIT_CALLS=%q\n' "$SHELL_WORK_EDIT_CALLS"
+    printf 'RALPH_SESSION_WORK_EDIT_CALLS=%q\n' "$((WORK_WRITE_CALLS + SHELL_WORK_EDIT_CALLS))"
     printf 'RALPH_SESSION_LARGE_READS=%q\n' "$LARGE_READS"
     printf 'RALPH_SESSION_LARGE_READ_REREADS=%q\n' "$LARGE_READ_REREADS"
     printf 'RALPH_SESSION_LARGE_READ_THRASH_HIT=%q\n' "$LARGE_READ_THRASH_HIT"
@@ -580,9 +901,35 @@ process_line() {
     "system")
       if [[ "$subtype" == "init" ]]; then
         local requested_model="${RALPH_MODEL_RUNTIME:-unknown}"
+        local requested_model_normalized
+        requested_model_normalized=$(printf '%s' "$requested_model" | tr '[:upper:]' '[:lower:]')
         local model=$(echo "$line" | jq -r '.model // "unknown"' 2>/dev/null) || model="unknown"
+        local model_normalized
+        model_normalized=$(printf '%s' "$model" | tr '[:upper:]' '[:lower:]')
         local session_id=$(echo "$line" | jq -r '.session_id // .sessionId // .chatId // empty' 2>/dev/null) || session_id=""
         local permission_mode=$(echo "$line" | jq -r '.permissionMode // .permission_mode // empty' 2>/dev/null) || permission_mode=""
+        if [[ "$requested_model_normalized" == "auto" ]]; then
+          if [[ "$model_normalized" == *"auto"* ]]; then
+            model="auto"
+            model_normalized="auto"
+          else
+            CURSOR_MODEL="$model"
+            RALPH_MODEL_RUNTIME="$model"
+            if [[ -n "$session_id" ]]; then
+              CURSOR_SESSION_ID="$session_id"
+            fi
+            if [[ -n "$permission_mode" ]]; then
+              CURSOR_PERMISSION_MODE="$permission_mode"
+            fi
+            local violation_msg="MODEL POLICY VIOLATION: requested auto but Cursor started $model"
+            log_error "$violation_msg"
+            log_activity "$violation_msg"
+            echo "$violation_msg" >&2
+            emit_signal_once "ABORT" "$violation_msg" "$violation_msg"
+            write_session_metrics
+            return
+          fi
+        fi
         CURSOR_MODEL="$model"
         RALPH_MODEL_RUNTIME="$model"
         if [[ -n "$session_id" ]]; then
@@ -726,6 +1073,7 @@ process_line() {
           
           # Track for thrashing detection
           track_file_write "$path"
+          update_workspace_snapshot_entry "$path"
           
         # Handle shell tool completion
         elif echo "$line" | jq -e '.tool_call.shellToolCall.result' > /dev/null 2>&1; then
@@ -744,6 +1092,11 @@ process_line() {
           local shell_tokens
           shell_tokens=$(estimate_shell_tokens "$output_chars" "$output_lines")
           TOKEN_EST_SHELL=$((TOKEN_EST_SHELL + shell_tokens))
+          track_shell_edits "$cmd" "$exit_code"
+          local shell_edit_count="$LAST_SHELL_EDIT_COUNT"
+          local shell_work_edit_seen="$LAST_SHELL_WORK_EDIT_SEEN"
+          local shell_edit_bytes="$LAST_SHELL_EDIT_BYTES"
+          local shell_edit_tokens="$LAST_SHELL_EDIT_TOKENS"
           
           if [[ $exit_code -eq 0 ]]; then
             if [[ $output_chars -gt 1024 ]]; then
@@ -754,6 +1107,18 @@ process_line() {
           else
             log_activity "SHELL $cmd → exit $exit_code (~${shell_tokens} tok)"
             track_shell_failure "$cmd" "$exit_code"
+          fi
+
+          if [[ "${shell_edit_count:-0}" -gt 0 ]]; then
+            local edit_summary="${shell_edit_count} file"
+            if [[ "${shell_edit_count:-0}" -ne 1 ]]; then
+              edit_summary="${shell_edit_count} files"
+            fi
+            if [[ "${shell_work_edit_seen:-0}" -eq 1 ]]; then
+              log_activity "SHELL MUTATION $cmd → $edit_summary (${shell_edit_bytes}B, ~${shell_edit_tokens} write tok, includes worktree edits)"
+            else
+              log_activity "SHELL MUTATION $cmd → $edit_summary (${shell_edit_bytes}B, ~${shell_edit_tokens} write tok)"
+            fi
           fi
         fi
         
@@ -772,6 +1137,8 @@ main() {
   echo "═══════════════════════════════════════════════════════════════" >> "$RALPH_DIR/activity.log"
   echo "Ralph Session Started: $(date)" >> "$RALPH_DIR/activity.log"
   echo "═══════════════════════════════════════════════════════════════" >> "$RALPH_DIR/activity.log"
+
+  ensure_workspace_snapshot
   
   # Track last token log time
   local last_token_log=$(date +%s)
@@ -787,7 +1154,7 @@ main() {
     fi
   done
   
-  log_activity "SESSION SUMMARY: reads=$READ_CALLS writes=$WRITE_CALLS work_writes=$WORK_WRITE_CALLS shell=$SHELL_CALLS large_reads=$LARGE_READS large_rereads=$LARGE_READ_REREADS signal=${LAST_SIGNAL:-NONE}"
+  log_activity "SESSION SUMMARY: reads=$READ_CALLS writes=$WRITE_CALLS work_writes=$WORK_WRITE_CALLS shell=$SHELL_CALLS shell_edits=$SHELL_EDIT_CALLS shell_work_edits=$SHELL_WORK_EDIT_CALLS large_reads=$LARGE_READS large_rereads=$LARGE_READ_REREADS signal=${LAST_SIGNAL:-NONE}"
   write_session_metrics
   # Final token status
   log_token_status

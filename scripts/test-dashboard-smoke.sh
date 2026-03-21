@@ -84,6 +84,9 @@ RALPH_SESSION_READ_CALLS=1
 RALPH_SESSION_WRITE_CALLS=0
 RALPH_SESSION_WORK_WRITE_CALLS=0
 RALPH_SESSION_SHELL_CALLS=0
+RALPH_SESSION_SHELL_EDIT_CALLS=0
+RALPH_SESSION_SHELL_WORK_EDIT_CALLS=0
+RALPH_SESSION_WORK_EDIT_CALLS=0
 RALPH_SESSION_LARGE_READS=0
 RALPH_SESSION_LARGE_READ_REREADS=0
 RALPH_SESSION_LARGE_READ_THRASH_HIT=0
@@ -383,6 +386,31 @@ run_parser_session_metadata_case() {
   assert_contains "$workspace/.ralph/.last-session.env" "RALPH_SESSION_REQUEST_ID=request-parser-789"
   assert_contains "$workspace/.ralph/.last-session.env" "RALPH_SESSION_PERMISSION_MODE=default"
   assert_contains "$workspace/.ralph/.last-session.env" "RALPH_SESSION_MODEL=Cursor\\ Model\\ With\\ Spaces"
+}
+
+run_shell_edit_tracking_case() {
+  local workspace
+  workspace="$(make_workspace)"
+  git -C "$workspace" init -q
+  mkdir -p "$workspace/src"
+
+  cat > "$workspace/src/demo.ts" <<'EOF'
+export const value = 1
+EOF
+
+  {
+    printf '%s\n' '{"type":"system","subtype":"init","model":"test-model"}'
+    sleep 0.2
+    perl -0pi -e 's/value = 1/value = 2/' "$workspace/src/demo.ts"
+    printf '%s\n' '{"type":"tool_call","subtype":"completed","tool_call":{"shellToolCall":{"args":{"command":"perl -0pi -e '\''s/value = 1/value = 2/'\'' src/demo.ts"},"result":{"exitCode":0,"stdout":"","stderr":""}}}}'
+  } | WARN_THRESHOLD=999999 ROTATE_THRESHOLD=999999 bash "$REPO_DIR/scripts/stream-parser.sh" "$workspace" >"$workspace/parser.out"
+
+  assert_contains "$workspace/.ralph/.last-session.env" "RALPH_SESSION_SHELL_EDIT_CALLS=1"
+  assert_contains "$workspace/.ralph/.last-session.env" "RALPH_SESSION_SHELL_WORK_EDIT_CALLS=1"
+  assert_contains "$workspace/.ralph/.last-session.env" "RALPH_SESSION_WORK_EDIT_CALLS=1"
+  assert_contains "$workspace/.ralph/activity.log" "SHELL-EDIT modified src/demo.ts"
+  assert_contains "$workspace/.ralph/activity.log" "SHELL MUTATION perl -0pi"
+  assert_contains "$workspace/.ralph/shell-edit-trace.tsv" "src/demo.ts"
 }
 
 run_navigation_brief_case() {
@@ -743,6 +771,7 @@ PY
   run_tui_spinner_suppression_case
   run_stop_helper_case
   run_parser_session_metadata_case
+  run_shell_edit_tracking_case
   run_navigation_brief_case
   run_task_validation_case
   run_task_scaffolding_warning_case

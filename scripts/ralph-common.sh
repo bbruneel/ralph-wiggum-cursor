@@ -191,6 +191,9 @@ load_last_session_metrics() {
   RALPH_SESSION_WRITE_CALLS=0
   RALPH_SESSION_WORK_WRITE_CALLS=0
   RALPH_SESSION_SHELL_CALLS=0
+  RALPH_SESSION_SHELL_EDIT_CALLS=0
+  RALPH_SESSION_SHELL_WORK_EDIT_CALLS=0
+  RALPH_SESSION_WORK_EDIT_CALLS=0
   RALPH_SESSION_LARGE_READS=0
   RALPH_SESSION_LARGE_READ_REREADS=0
   RALPH_SESSION_LARGE_READ_THRASH_HIT=0
@@ -239,6 +242,9 @@ initialize_session_metrics() {
     printf 'RALPH_SESSION_WRITE_CALLS=%q\n' "0"
     printf 'RALPH_SESSION_WORK_WRITE_CALLS=%q\n' "0"
     printf 'RALPH_SESSION_SHELL_CALLS=%q\n' "0"
+    printf 'RALPH_SESSION_SHELL_EDIT_CALLS=%q\n' "0"
+    printf 'RALPH_SESSION_SHELL_WORK_EDIT_CALLS=%q\n' "0"
+    printf 'RALPH_SESSION_WORK_EDIT_CALLS=%q\n' "0"
     printf 'RALPH_SESSION_LARGE_READS=%q\n' "0"
     printf 'RALPH_SESSION_LARGE_READ_REREADS=%q\n' "0"
     printf 'RALPH_SESSION_LARGE_READ_THRASH_HIT=%q\n' "0"
@@ -556,8 +562,15 @@ resolve_navigation_target() {
   normalize_workspace_path "$workspace" "$path"
 }
 
+session_work_edit_calls_total() {
+  echo $(( ${RALPH_SESSION_WORK_WRITE_CALLS:-0} + ${RALPH_SESSION_SHELL_WORK_EDIT_CALLS:-0} ))
+}
+
 should_force_narrow_mode() {
   local workspace="$1"
+  local work_edit_calls
+
+  work_edit_calls=$(session_work_edit_calls_total)
 
   if [[ "${RALPH_SESSION_LARGE_READ_THRASH_HIT:-0}" -eq 1 ]]; then
     return 0
@@ -567,7 +580,7 @@ should_force_narrow_mode() {
     return 0
   fi
 
-  if [[ "${RALPH_SESSION_LARGE_READ_REREADS:-0}" -ge 2 ]] && [[ "${RALPH_SESSION_WORK_WRITE_CALLS:-0}" -eq 0 ]]; then
+  if [[ "${RALPH_SESSION_LARGE_READ_REREADS:-0}" -ge 2 ]] && [[ "$work_edit_calls" -eq 0 ]]; then
     return 0
   fi
 
@@ -1934,6 +1947,10 @@ EOF
     printf 'timestamp\titeration\tpath\tbytes\tlines\tper_file_reads\twrite_calls_before_read\tthrash_hit\n' > "$ralph_dir/read-trace.tsv"
   fi
 
+  if [[ ! -f "$ralph_dir/shell-edit-trace.tsv" ]]; then
+    printf 'timestamp\titeration\texit_code\tstatus\tpath\tbefore_bytes\tafter_bytes\twork_path\tcommand\n' > "$ralph_dir/shell-edit-trace.tsv"
+  fi
+
   if [[ ! -f "$ralph_dir/runtime.env" ]]; then
     write_runtime_state "$workspace" "idle" "$(get_iteration "$workspace")" "$MODEL" "NONE" "Waiting for Ralph"
   fi
@@ -2578,6 +2595,7 @@ run_ralph_loop() {
   
   while [[ $iteration -le $MAX_ITERATIONS ]]; do
     local head_before criteria_before done_before
+    local work_edit_calls
     head_before=$(get_git_head)
     criteria_before=$(count_criteria "$workspace")
     done_before="${criteria_before%%:*}"
@@ -2592,9 +2610,10 @@ run_ralph_loop() {
     done_after="${criteria_after%%:*}"
 
     load_last_session_metrics "$workspace"
+    work_edit_calls=$(session_work_edit_calls_total)
 
     local progress_made=0
-    if [[ "$head_before" != "$head_after" ]] || [[ "$done_after" -gt "$done_before" ]] || [[ "${RALPH_SESSION_WORK_WRITE_CALLS:-0}" -gt 0 ]]; then
+    if [[ "$head_before" != "$head_after" ]] || [[ "$done_after" -gt "$done_before" ]] || [[ "$work_edit_calls" -gt 0 ]]; then
       progress_made=1
     fi
 

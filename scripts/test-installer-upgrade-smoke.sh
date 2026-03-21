@@ -58,6 +58,7 @@ EOF
   test -f "$workspace/.ralph/session-brief.md"
   test -f "$workspace/.ralph/navigation-brief.md"
   test -f "$workspace/.ralph/read-trace.tsv"
+  test -f "$workspace/.ralph/shell-edit-trace.tsv"
   test -f "$workspace/.cursor/ralph-scripts/ralph-tui.py"
 
   assert_contains "$install_log" "Preserved .ralph/progress.md"

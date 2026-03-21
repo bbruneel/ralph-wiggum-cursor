@@ -72,6 +72,7 @@ This creates two problems:
 - **FUN live dashboard** - Lightweight fullscreen TUI for activity, progress, tasks, errors, and signal history
 - **Cheap-model handoff** - Auto-generates `.ralph/session-brief.md` so each new iteration starts from a curated working set instead of rediscovering context
 - **Smarter token tracking** - Parser weights reads, writes, assistant output, shell output, and tool-call overhead instead of using a flat chars/4 guess
+- **Shell edit detection** - Partial shell mutations like `sed -i`, `perl -0pi`, and here-doc rewrites are traced into session metrics
 - **Anti-thrash detection** - Detects when the agent is stuck on repeated failures, write-thrashing, or repeated large-file rereads
 - **Self-managing continuity** - Compacts live progress/activity logs and archives history so long runs stay restartable
 - **Rate limit handling** - Detects rate limits/network errors, waits with exponential backoff
@@ -226,7 +227,7 @@ Ralph will:
 
 This opens the Textual dashboard with:
 - a dense cockpit header tuned for wide laptop terminals
-- task progress bars, token mix, and agent I/O telemetry sourced from `.ralph/.last-session.env`
+- task progress bars, token mix, and agent I/O telemetry sourced from `.ralph/.last-session.env`, including shell edit counts
 - a feedback radar that shows the latest pulse from activity, progress, tasks, signals, errors, and console at the same time
 - automatic split view on roomy terminals so the main pane and a live buddy pane stay visible together
 - a Frogmouth-style command bar for quick navigation and pane search
@@ -632,6 +633,7 @@ Both are verified before declaring success.
 | `.ralph/progress.md` | What's been accomplished | Agent writes after work |
 | `.ralph/guardrails.md` | Lessons learned (Signs) | Agent reads first, writes after failures |
 | `.ralph/activity.log` | Tool call log with token counts | Parser writes, you monitor |
+| `.ralph/shell-edit-trace.tsv` | Shell mutation ledger for partial edits | Parser writes, you inspect |
 | `.ralph/errors.log` | Failures + gutter detection | Parser writes, agent reads |
 | `.ralph/tasks.yaml` | Cached task state (auto-generated) | Task parser writes/reads |
 | `.ralph/tasks.mtime` | Task file modification time | Cache invalidation |

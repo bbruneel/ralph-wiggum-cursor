@@ -197,6 +197,9 @@ class SessionTelemetry:
     write_calls: int
     work_write_calls: int
     shell_calls: int
+    shell_edit_calls: int
+    shell_work_edit_calls: int
+    work_edit_calls: int
     large_reads: int
     large_read_rereads: int
     large_read_thrash_hit: bool
@@ -580,6 +583,9 @@ def session_telemetry(session: dict[str, str]) -> SessionTelemetry:
         write_calls=int_value(session.get("RALPH_SESSION_WRITE_CALLS")),
         work_write_calls=int_value(session.get("RALPH_SESSION_WORK_WRITE_CALLS")),
         shell_calls=int_value(session.get("RALPH_SESSION_SHELL_CALLS")),
+        shell_edit_calls=int_value(session.get("RALPH_SESSION_SHELL_EDIT_CALLS")),
+        shell_work_edit_calls=int_value(session.get("RALPH_SESSION_SHELL_WORK_EDIT_CALLS")),
+        work_edit_calls=int_value(session.get("RALPH_SESSION_WORK_EDIT_CALLS")),
         large_reads=int_value(session.get("RALPH_SESSION_LARGE_READS")),
         large_read_rereads=int_value(session.get("RALPH_SESSION_LARGE_READ_REREADS")),
         large_read_thrash_hit=int_value(session.get("RALPH_SESSION_LARGE_READ_THRASH_HIT")) > 0,
@@ -2895,7 +2901,11 @@ def launch_textual_dashboard(workspace: Path, mode: str, child_args: list[str]) 
             )
             telemetry_table.add_row(
                 "Tools",
-                f"{telemetry.tool_calls} total / {telemetry.work_write_calls} work writes",
+                f"{telemetry.tool_calls} total / {telemetry.work_edit_calls} work edits",
+            )
+            telemetry_table.add_row(
+                "Shell edits",
+                f"{telemetry.shell_edit_calls} cmds / {telemetry.shell_work_edit_calls} work",
             )
             telemetry_table.add_row(
                 "Large reads",

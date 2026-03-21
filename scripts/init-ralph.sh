@@ -198,6 +198,7 @@ cat > .ralph/navigation-brief.md << 'EOF'
 EOF
 
 printf 'timestamp\titeration\tpath\tbytes\tlines\tper_file_reads\twrite_calls_before_read\tthrash_hit\n' > .ralph/read-trace.tsv
+printf 'timestamp\titeration\texit_code\tstatus\tpath\tbefore_bytes\tafter_bytes\twork_path\tcommand\n' > .ralph/shell-edit-trace.tsv
 
 cat > .ralph/runtime.env << 'EOF'
 # Ralph runtime state
@@ -264,6 +265,7 @@ echo "  • .ralph/guardrails.md - Lessons learned (agent updates this)"
 echo "  • .ralph/progress.md   - Progress log (agent updates this)"
 echo "  • .ralph/activity.log  - Tool call log (parser updates this)"
 echo "  • .ralph/read-trace.tsv - Large-read ledger for hotspot detection"
+echo "  • .ralph/shell-edit-trace.tsv - Shell mutation ledger for partial edits"
 echo "  • .ralph/signals.log   - Signal/event history (dashboard reads this)"
 echo "  • .ralph/errors.log    - Failure log (parser updates this)"
 echo ""
