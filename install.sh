@@ -246,6 +246,22 @@ write_file_if_missing .ralph/session-brief.md << 'EOF'
 
 EOF
 
+write_file_if_missing .ralph/navigation-brief.md << 'EOF'
+# Ralph Navigation Brief
+
+> Auto-generated before each iteration when Ralph needs a tighter map through a large file.
+
+- Generated: not yet
+- Last session signal: NONE
+- Forced narrow mode: standby
+- Current hot file: not yet identified
+
+EOF
+
+write_file_if_missing .ralph/read-trace.tsv << 'EOF'
+timestamp	iteration	path	bytes	lines	per_file_reads	write_calls_before_read	thrash_hit
+EOF
+
 write_file_if_missing .ralph/runtime.env << 'EOF'
 # Ralph runtime state
 RALPH_RUNTIME_STATUS=idle

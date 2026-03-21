@@ -47,6 +47,10 @@ SESSION_BRIEF_MAX_DIRTY_FILES="${SESSION_BRIEF_MAX_DIRTY_FILES:-8}"
 SESSION_BRIEF_MAX_ERROR_LINES="${SESSION_BRIEF_MAX_ERROR_LINES:-6}"
 SESSION_BRIEF_MAX_LARGE_FILES="${SESSION_BRIEF_MAX_LARGE_FILES:-8}"
 SESSION_BRIEF_EXCLUDE_REGEX="${SESSION_BRIEF_EXCLUDE_REGEX:-(^|/)(\\.git|node_modules|vendor|vendors|third_party|third-party|dist|build|coverage|\\.next|target|test-results|\\.ralph/archive)(/|$)|\\.min\\.(js|css|mjs)$}"
+READ_TRACE_RECENT_LIMIT="${READ_TRACE_RECENT_LIMIT:-200}"
+READ_HOTSPOT_LIMIT="${READ_HOTSPOT_LIMIT:-5}"
+NAVIGATION_ANCHOR_LIMIT="${NAVIGATION_ANCHOR_LIMIT:-12}"
+NAVIGATION_WINDOW_RADIUS="${NAVIGATION_WINDOW_RADIUS:-40}"
 
 # Sequential run locking
 SEQUENTIAL_LOCK_DIR="${SEQUENTIAL_LOCK_DIR:-.ralph/locks/sequential.lock}"
@@ -165,6 +169,11 @@ load_last_session_metrics() {
   RALPH_SESSION_LARGE_READS=0
   RALPH_SESSION_LARGE_READ_REREADS=0
   RALPH_SESSION_LARGE_READ_THRASH_HIT=0
+  RALPH_SESSION_HOT_FILE=""
+  RALPH_SESSION_HOT_FILE_READS=0
+  RALPH_SESSION_HOT_FILE_BYTES=0
+  RALPH_SESSION_HOT_FILE_LINES=0
+  RALPH_SESSION_THRASH_PATH=""
   RALPH_SESSION_PROMPT_TOKENS=0
   RALPH_SESSION_READ_TOKENS=0
   RALPH_SESSION_WRITE_TOKENS=0
@@ -208,6 +217,11 @@ initialize_session_metrics() {
     printf 'RALPH_SESSION_LARGE_READS=%q\n' "0"
     printf 'RALPH_SESSION_LARGE_READ_REREADS=%q\n' "0"
     printf 'RALPH_SESSION_LARGE_READ_THRASH_HIT=%q\n' "0"
+    printf 'RALPH_SESSION_HOT_FILE=%q\n' ""
+    printf 'RALPH_SESSION_HOT_FILE_READS=%q\n' "0"
+    printf 'RALPH_SESSION_HOT_FILE_BYTES=%q\n' "0"
+    printf 'RALPH_SESSION_HOT_FILE_LINES=%q\n' "0"
+    printf 'RALPH_SESSION_THRASH_PATH=%q\n' ""
     printf 'RALPH_SESSION_PROMPT_TOKENS=%q\n' "0"
     printf 'RALPH_SESSION_READ_TOKENS=%q\n' "0"
     printf 'RALPH_SESSION_WRITE_TOKENS=%q\n' "0"
@@ -440,6 +454,169 @@ get_file_line_count() {
   wc -l < "$file" | tr -d '[:space:]'
 }
 
+normalize_workspace_path() {
+  local workspace="$1"
+  local path="$2"
+
+  [[ -n "$path" ]] || return 0
+
+  if [[ "$path" == "$workspace" ]]; then
+    printf '.\n'
+    return
+  fi
+
+  if [[ "$path" == "$workspace/"* ]]; then
+    path="${path#$workspace/}"
+  fi
+
+  path="${path#./}"
+  printf '%s\n' "$path"
+}
+
+workspace_path_to_file() {
+  local workspace="$1"
+  local path="$2"
+
+  if [[ -z "$path" ]]; then
+    printf '%s\n' ""
+  elif [[ "$path" == /* ]]; then
+    printf '%s\n' "$path"
+  elif [[ "$path" == "." ]]; then
+    printf '%s\n' "$workspace"
+  else
+    printf '%s/%s\n' "$workspace" "$path"
+  fi
+}
+
+summarize_recent_read_hotspots() {
+  local workspace="$1"
+  local limit="${2:-$READ_HOTSPOT_LIMIT}"
+  local trace_file="$workspace/.ralph/read-trace.tsv"
+
+  [[ -f "$trace_file" ]] || return 0
+
+  tail -n "$((READ_TRACE_RECENT_LIMIT + 1))" "$trace_file" 2>/dev/null | awk -F '\t' '
+    NR == 1 && $1 == "timestamp" { next }
+    NF >= 7 {
+      path = $3
+      count[path]++
+      last_iter[path] = $2
+      if (($4 + 0) > (max_bytes[path] + 0)) {
+        max_bytes[path] = $4 + 0
+      }
+      if (($5 + 0) > (max_lines[path] + 0)) {
+        max_lines[path] = $5 + 0
+      }
+    }
+    END {
+      for (path in count) {
+        printf "%d\t%s\t%d\t%d\t%s\n", count[path], last_iter[path], max_bytes[path], max_lines[path], path
+      }
+    }
+  ' | sort -nr -k1,1 | sed -n "1,${limit}p"
+}
+
+resolve_navigation_target() {
+  local workspace="$1"
+  local path="${RALPH_SESSION_THRASH_PATH:-}"
+
+  if [[ -z "$path" ]]; then
+    path="${RALPH_SESSION_HOT_FILE:-}"
+  fi
+
+  if [[ -z "$path" ]]; then
+    path=$(summarize_recent_read_hotspots "$workspace" 1 | awk -F '\t' 'NR == 1 { print $5 }')
+  fi
+
+  normalize_workspace_path "$workspace" "$path"
+}
+
+should_force_narrow_mode() {
+  local workspace="$1"
+
+  if [[ "${RALPH_SESSION_LARGE_READ_THRASH_HIT:-0}" -eq 1 ]]; then
+    return 0
+  fi
+
+  if [[ "${RALPH_SESSION_SIGNAL:-NONE}" == "THRASH" ]]; then
+    return 0
+  fi
+
+  if [[ "${RALPH_SESSION_LARGE_READ_REREADS:-0}" -ge 2 ]] && [[ "${RALPH_SESSION_WORK_WRITE_CALLS:-0}" -eq 0 ]]; then
+    return 0
+  fi
+
+  if tail -n 8 "$workspace/.ralph/errors.log" 2>/dev/null | grep -Eq 'THRASH ROTATION|THRASH STOP'; then
+    return 0
+  fi
+
+  return 1
+}
+
+list_navigation_anchors() {
+  local file="$1"
+  local limit="${2:-$NAVIGATION_ANCHOR_LIMIT}"
+  local pattern='^[[:space:]]*((export[[:space:]]+)?(async[[:space:]]+)?function[[:space:]]+[A-Za-z0-9_$]+|(class|interface|enum|type)[[:space:]]+[A-Za-z0-9_$]+|(const|let|var)[[:space:]]+[A-Za-z0-9_$]+[[:space:]]*=|((pub[[:space:]]+)?fn|def|func)[[:space:]]+[A-Za-z0-9_]+|(describe|it|test)[[:space:]]*\(|#{1,6}[[:space:]])'
+
+  [[ -f "$file" ]] || return 0
+
+  if command -v rg >/dev/null 2>&1; then
+    rg -n -m "$limit" -e "$pattern" "$file" 2>/dev/null || true
+  else
+    grep -nE "$pattern" "$file" 2>/dev/null | sed -n "1,${limit}p"
+  fi
+}
+
+clamp_navigation_window() {
+  local total_lines="$1"
+  local center_line="$2"
+  local radius="${3:-$NAVIGATION_WINDOW_RADIUS}"
+  local start_line end_line
+
+  [[ "$total_lines" =~ ^[0-9]+$ ]] || total_lines=0
+  [[ "$center_line" =~ ^[0-9]+$ ]] || center_line=1
+  [[ "$radius" =~ ^[0-9]+$ ]] || radius=40
+
+  if [[ "$total_lines" -le 0 ]]; then
+    printf '1:1\n'
+    return
+  fi
+
+  start_line=$((center_line - radius))
+  end_line=$((center_line + radius))
+
+  if [[ "$start_line" -lt 1 ]]; then
+    start_line=1
+  fi
+  if [[ "$end_line" -gt "$total_lines" ]]; then
+    end_line="$total_lines"
+  fi
+  if [[ "$end_line" -lt "$start_line" ]]; then
+    end_line="$start_line"
+  fi
+
+  printf '%s:%s\n' "$start_line" "$end_line"
+}
+
+recent_file_read_trace() {
+  local workspace="$1"
+  local relative_path="$2"
+  local limit="${3:-6}"
+  local trace_file="$workspace/.ralph/read-trace.tsv"
+  local absolute_path
+
+  [[ -f "$trace_file" ]] || return 0
+
+  absolute_path=$(workspace_path_to_file "$workspace" "$relative_path")
+
+  awk -F '\t' -v rel="$relative_path" -v abs="$absolute_path" '
+    NR == 1 { next }
+    $3 == rel || $3 == abs {
+      printf "%s\t%s\t%s\t%s\t%s\t%s\n", $2, $4, $5, $6, $7, $8
+    }
+  ' "$trace_file" | tail -n "$limit"
+}
+
 # Return success when a log file should be compacted
 should_rotate_log_file() {
   local file="$1"
@@ -629,6 +806,219 @@ list_large_context_files() {
   done | sort -nr -k1,1 | head -n "$max_files"
 }
 
+write_navigation_brief() {
+  local workspace="$1"
+  local brief_file="$workspace/.ralph/navigation-brief.md"
+  local tmp_file hotspot_summary target_path target_file quoted_target
+  local recent_target_reads anchors
+  local forced_narrow=0
+  local target_exists=0
+  local target_lines=0
+  local target_bytes=0
+
+  hotspot_summary=$(summarize_recent_read_hotspots "$workspace" "$READ_HOTSPOT_LIMIT")
+  target_path=$(resolve_navigation_target "$workspace")
+
+  if should_force_narrow_mode "$workspace"; then
+    forced_narrow=1
+  fi
+
+  if [[ -n "$target_path" ]]; then
+    target_file=$(workspace_path_to_file "$workspace" "$target_path")
+    quoted_target=$(printf '%q' "$target_path")
+  else
+    target_file=""
+    quoted_target=""
+  fi
+
+  if [[ -n "$target_file" ]] && [[ -f "$target_file" ]]; then
+    target_exists=1
+    target_lines=$(get_file_line_count "$target_file")
+    target_bytes=$(get_file_size_bytes "$target_file")
+    anchors=$(list_navigation_anchors "$target_file" "$NAVIGATION_ANCHOR_LIMIT")
+    recent_target_reads=$(recent_file_read_trace "$workspace" "$target_path" 6)
+  else
+    anchors=""
+    recent_target_reads=""
+  fi
+
+  tmp_file=$(mktemp)
+
+  {
+    echo "# Ralph Navigation Brief"
+    echo ""
+    echo "> Auto-generated before each iteration when Ralph needs a tighter map through a large file."
+    echo ""
+    echo "- Generated: $(date '+%Y-%m-%d %H:%M:%S %Z')"
+    echo "- Last session signal: ${RALPH_SESSION_SIGNAL:-NONE}"
+    if [[ "$forced_narrow" -eq 1 ]]; then
+      echo "- Forced narrow mode: ACTIVE"
+    else
+      echo "- Forced narrow mode: standby"
+    fi
+    if [[ -n "$target_path" ]]; then
+      echo "- Current hot file: $target_path"
+    else
+      echo "- Current hot file: not yet identified"
+    fi
+    echo ""
+    echo "## Operating Mode"
+    echo ""
+    if [[ "$forced_narrow" -eq 1 ]]; then
+      echo "- Large-file reread thrash was detected recently. Stay narrow and deliberate."
+      if [[ -n "$target_path" ]]; then
+        echo "- Do not full-read \`$target_path\` unless you are editing it immediately."
+      else
+        echo "- Do not full-read any hotspot file until you have narrowed to a symbol or line window."
+      fi
+      echo "- Start with one command from the recommended list below."
+      echo "- After one or two narrow reads, either make a concrete edit/test change or record the next exact slice in \`.ralph/progress.md\`."
+    else
+      echo "- Use this brief before reopening any hotspot file."
+      echo "- Favor symbol search and line windows over full-file rereads."
+    fi
+    echo ""
+  } > "$tmp_file"
+
+  if [[ -n "$hotspot_summary" ]]; then
+    {
+      echo "## Recent Large-Read Hotspots"
+      echo ""
+      while IFS=$'\t' read -r count last_iter max_bytes max_lines path; do
+        local display_path marker kb
+        [[ -n "$path" ]] || continue
+        display_path=$(normalize_workspace_path "$workspace" "$path")
+        kb=$((max_bytes / 1024))
+        marker=""
+        if [[ -n "$target_path" ]] && [[ "$display_path" == "$target_path" ]]; then
+          marker=" <- current hot file"
+        fi
+        echo "- $display_path (${count} large reads in recent trace, last iteration ${last_iter}, ~${kb}KB, ${max_lines} lines)$marker"
+      done <<< "$hotspot_summary"
+      echo ""
+    } >> "$tmp_file"
+  fi
+
+  if [[ -n "$target_path" ]]; then
+    {
+      echo "## Target Snapshot"
+      echo ""
+      echo "- File: $target_path"
+      if [[ "$target_exists" -eq 1 ]]; then
+        echo "- Size: ~$((target_bytes / 1024))KB, ${target_lines} lines"
+        if [[ "${RALPH_SESSION_HOT_FILE_READS:-0}" -gt 0 ]]; then
+          echo "- Last session large-read count for this file: ${RALPH_SESSION_HOT_FILE_READS}"
+        fi
+      else
+        echo "- Status: file not present in the current working tree. Use the hotspot list and task brief to pick a different narrow read."
+      fi
+      echo ""
+    } >> "$tmp_file"
+  fi
+
+  if [[ -n "$anchors" ]]; then
+    {
+      local anchor_count=0
+      echo "## Candidate Anchors"
+      echo ""
+      while IFS= read -r anchor; do
+        local line snippet
+        [[ -n "$anchor" ]] || continue
+        line="${anchor%%:*}"
+        snippet=$(printf '%s' "$anchor" | sed -E 's/^[0-9]+:[[:space:]]*//; s/[[:space:]]+/ /g' | cut -c1-96)
+        echo "- line $line: $snippet"
+        anchor_count=$((anchor_count + 1))
+        if [[ "$anchor_count" -ge 8 ]]; then
+          break
+        fi
+      done <<< "$anchors"
+      echo ""
+    } >> "$tmp_file"
+  fi
+
+  {
+    echo "## Recommended Commands"
+    echo ""
+    if [[ -n "$target_path" ]]; then
+      echo "- \`wc -l $quoted_target\`"
+      echo "- \`rg -n 'function|class|interface|type|def|fn|describe\\(|test\\(' $quoted_target\`"
+    else
+      echo "- Start from \`.ralph/session-brief.md\` and keep discovery narrow."
+    fi
+  } >> "$tmp_file"
+
+  if [[ "$target_exists" -eq 1 ]]; then
+    local shown_windows=0
+    local used_windows=""
+
+    if [[ -n "$anchors" ]]; then
+      while IFS= read -r anchor; do
+        local line window start_line end_line
+        [[ -n "$anchor" ]] || continue
+        line="${anchor%%:*}"
+        [[ "$line" =~ ^[0-9]+$ ]] || continue
+        window=$(clamp_navigation_window "$target_lines" "$line" "$NAVIGATION_WINDOW_RADIUS")
+        case " $used_windows " in
+          *" $window "*) continue ;;
+        esac
+        used_windows="$used_windows $window"
+        start_line="${window%%:*}"
+        end_line="${window##*:}"
+        echo "- lines ${start_line}-${end_line}: \`sed -n '${start_line},${end_line}p' $quoted_target\`" >> "$tmp_file"
+        shown_windows=$((shown_windows + 1))
+        if [[ "$shown_windows" -ge 3 ]]; then
+          break
+        fi
+      done <<< "$anchors"
+    fi
+
+    if [[ "$shown_windows" -lt 3 ]]; then
+      local center window start_line end_line
+      for center in 1 $(((target_lines + 1) / 2)) "$target_lines"; do
+        window=$(clamp_navigation_window "$target_lines" "$center" "$NAVIGATION_WINDOW_RADIUS")
+        case " $used_windows " in
+          *" $window "*) continue ;;
+        esac
+        used_windows="$used_windows $window"
+        start_line="${window%%:*}"
+        end_line="${window##*:}"
+        echo "- lines ${start_line}-${end_line}: \`sed -n '${start_line},${end_line}p' $quoted_target\`" >> "$tmp_file"
+        shown_windows=$((shown_windows + 1))
+        if [[ "$shown_windows" -ge 3 ]]; then
+          break
+        fi
+      done
+    fi
+
+    echo "" >> "$tmp_file"
+  fi
+
+  if [[ -n "$recent_target_reads" ]]; then
+    {
+      echo "## Recent Large Reads For Target"
+      echo ""
+      while IFS=$'\t' read -r iteration bytes lines per_file_reads write_calls thrash_hit; do
+        local kb read_note thrash_note
+        kb=$((bytes / 1024))
+        if [[ "$write_calls" -eq 0 ]]; then
+          read_note="before any write"
+        else
+          read_note="after ${write_calls} write(s)"
+        fi
+        if [[ "$thrash_hit" -eq 1 ]]; then
+          thrash_note=", triggered thrash"
+        else
+          thrash_note=""
+        fi
+        echo "- Iteration ${iteration}: ~${kb}KB, ${lines} lines, file read #${per_file_reads} ${read_note}${thrash_note}"
+      done <<< "$recent_target_reads"
+      echo ""
+    } >> "$tmp_file"
+  fi
+
+  mv "$tmp_file" "$brief_file"
+}
+
 append_task_slice_section() {
   local output_file="$1"
   local workspace="$2"
@@ -662,6 +1052,7 @@ write_session_brief() {
   local counts done_count total_count remaining_count
   local next_task next_id next_status next_desc next_line=""
   local pending_sample completed_sample dirty_files recent_errors large_files carried_notes
+  local hotspot_summary navigation_target forced_narrow=0
 
   counts=$(count_criteria "$workspace")
   done_count="${counts%%:*}"
@@ -687,6 +1078,12 @@ write_session_brief() {
   dirty_files=$(git -C "$workspace" status --short --untracked-files=all 2>/dev/null | sed -n "1,${SESSION_BRIEF_MAX_DIRTY_FILES}p")
   recent_errors=$(grep -vE '^(#|>|$)' "$workspace/.ralph/errors.log" 2>/dev/null | tail -n "$SESSION_BRIEF_MAX_ERROR_LINES")
   large_files=$(list_large_context_files "$workspace")
+  hotspot_summary=$(summarize_recent_read_hotspots "$workspace" "$READ_HOTSPOT_LIMIT")
+  navigation_target=$(resolve_navigation_target "$workspace")
+
+  if should_force_narrow_mode "$workspace"; then
+    forced_narrow=1
+  fi
 
   if [[ -f "$workspace/.ralph/progress.md" ]]; then
     carried_notes=$(extract_progress_keep_block "$workspace/.ralph/progress.md" \
@@ -727,9 +1124,24 @@ write_session_brief() {
     echo "## Hard Rules"
     echo ""
     echo "- Do not full-read \`.ralph/progress.md\` if the carried-forward notes here already answer your question."
+    echo "- If \`.ralph/navigation-brief.md\` names a hot file, follow its recommended commands before any direct reread."
     echo "- Do not full-read files listed under \"Large Files To Slice First\" until you have narrowed to a symbol or line range."
     echo "- If you reread the same huge file twice before writing code, you are stuck: switch to \`rg -n\` / \`sed -n\` or move on."
     echo ""
+
+    if [[ "$forced_narrow" -eq 1 ]]; then
+      echo "## Forced Narrow Mode"
+      echo ""
+      echo "- Active because the last session reread large files without meaningful progress."
+      if [[ -n "$navigation_target" ]]; then
+        echo "- Read \`.ralph/navigation-brief.md\` before reopening \`$navigation_target\`."
+        echo "- Do not full-read \`$navigation_target\` in this session unless you are editing it immediately."
+      else
+        echo "- Read \`.ralph/navigation-brief.md\` before opening any hotspot file."
+      fi
+      echo "- After one or two narrow reads, either make a concrete edit/test change or record the next exact slice in \`.ralph/progress.md\`."
+      echo ""
+    fi
 
     echo "## Immediate Focus"
     echo ""
@@ -738,8 +1150,12 @@ write_session_brief() {
     else
       echo "- Start with the next unchecked criterion in \`RALPH_TASK.md\`."
     fi
+    if [[ -n "$navigation_target" ]]; then
+      echo "- Use \`.ralph/navigation-brief.md\` before touching \`$navigation_target\`."
+    fi
     echo "- Prefer narrow reads (\`rg -n\`, \`wc -l\`, \`sed -n\`) before full-reading large files."
     echo "- If you have not written code yet, do not reread the same large file repeatedly."
+    echo "- Keep the first concrete code/test change closer than the third large-file read."
     echo ""
 
     if [[ -n "$pending_sample" ]]; then
@@ -777,6 +1193,23 @@ write_session_brief() {
       while IFS= read -r item; do
         [[ -n "$item" ]] && echo "- $item"
       done <<< "$recent_errors"
+      echo ""
+    fi
+
+    if [[ -n "$hotspot_summary" ]]; then
+      echo "## Recent Large-Read Hotspots"
+      echo ""
+      while IFS=$'\t' read -r count last_iter max_bytes max_lines path; do
+        local display_path marker kb
+        [[ -n "$path" ]] || continue
+        display_path=$(normalize_workspace_path "$workspace" "$path")
+        kb=$((max_bytes / 1024))
+        marker=""
+        if [[ -n "$navigation_target" ]] && [[ "$display_path" == "$navigation_target" ]]; then
+          marker=" <- hot file"
+        fi
+        echo "- $display_path (${count} reads, last iteration ${last_iter}, ~${kb}KB, ${max_lines} lines)$marker"
+      done <<< "$hotspot_summary"
       echo ""
     fi
 
@@ -1191,6 +1624,24 @@ EOF
 EOF
   fi
 
+  if [[ ! -f "$ralph_dir/navigation-brief.md" ]]; then
+    cat > "$ralph_dir/navigation-brief.md" << 'EOF'
+# Ralph Navigation Brief
+
+> Auto-generated before each iteration when Ralph needs a tighter map through a large file.
+
+- Generated: not yet
+- Last session signal: NONE
+- Forced narrow mode: standby
+- Current hot file: not yet identified
+
+EOF
+  fi
+
+  if [[ ! -f "$ralph_dir/read-trace.tsv" ]]; then
+    printf 'timestamp\titeration\tpath\tbytes\tlines\tper_file_reads\twrite_calls_before_read\tthrash_hit\n' > "$ralph_dir/read-trace.tsv"
+  fi
+
   if [[ ! -f "$ralph_dir/runtime.env" ]]; then
     write_runtime_state "$workspace" "idle" "$(get_iteration "$workspace")" "$MODEL" "NONE" "Waiting for Ralph"
   fi
@@ -1359,11 +1810,12 @@ You are an autonomous development agent using the Ralph methodology.
 
 Before doing anything:
 1. Read \`.ralph/session-brief.md\` - your curated working set for this iteration
-2. Read \`.ralph/guardrails.md\` - lessons from past failures (FOLLOW THESE)
-3. Do NOT read \`.ralph/progress.md\` unless the brief's carried-forward notes are insufficient
+2. Read \`.ralph/navigation-brief.md\` if it exists - especially before reopening any large/hot file
+3. Read \`.ralph/guardrails.md\` - lessons from past failures (FOLLOW THESE)
+4. Do NOT read \`.ralph/progress.md\` unless the brief's carried-forward notes are insufficient
    - If logs were rotated, trust the live summary first and only read archives if blocked
-4. Prefer the Task Slice already included in the brief; only open \`RALPH_TASK.md\` directly if you need more nearby context
-5. Read \`.ralph/errors.log\` only when the brief points to a recent failure you need more detail on
+5. Prefer the Task Slice already included in the brief; only open \`RALPH_TASK.md\` directly if you need more nearby context
+6. Read \`.ralph/errors.log\` only when the brief points to a recent failure you need more detail on
 
 ## Working Directory (Critical)
 
@@ -1406,9 +1858,12 @@ If you get rotated, the next agent picks up from your last commit. Your commits 
 ## Context Discipline (Critical)
 
 - Before full-reading any file larger than roughly 80KB or 800 lines, narrow first with \`rg -n\`, \`git diff --name-only\`, \`wc -l\`, or \`sed -n 'start,endp'\`
+- If \`.ralph/navigation-brief.md\` names a hot file, use its recommended commands before any direct reread
 - If a file is listed under "Large Files To Slice First" in the brief, treat full reads as a last resort
 - Do not full-read the same large file more than twice in one session unless you are editing it immediately
 - Avoid chaining together multiple giant file reads before making a concrete code/test change
+- In forced narrow mode, do not full-read the hot file at all unless you are editing it immediately
+- In forced narrow mode, after one or two narrow reads you must either edit code/tests or update \`.ralph/progress.md\` with the next exact slice
 - If context is getting tight and you have not written meaningful code yet, stop discovery, update \`.ralph/progress.md\` with the next concrete target, and let rotation happen
 
 ## Learning from Failures
@@ -1466,6 +1921,8 @@ run_iteration() {
   local script_dir="${3:-$(dirname "${BASH_SOURCE[0]}")}"
 
   auto_rotate_ralph_logs_if_needed "$workspace"
+  load_last_session_metrics "$workspace"
+  write_navigation_brief "$workspace"
   write_session_brief "$workspace"
   initialize_session_metrics "$workspace" "$iteration" "$MODEL"
   

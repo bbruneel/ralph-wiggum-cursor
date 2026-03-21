@@ -297,6 +297,63 @@ run_parser_session_metadata_case() {
   assert_contains "$workspace/.ralph/.last-session.env" "RALPH_SESSION_MODEL=Cursor\\ Model\\ With\\ Spaces"
 }
 
+run_navigation_brief_case() {
+  local workspace
+  workspace="$(make_workspace)"
+  git -C "$workspace" init -q
+  mkdir -p "$workspace/src"
+
+  {
+    echo "import { z } from 'zod'"
+    echo ""
+    echo "export function parseThing(input: string) {"
+    echo "  return input.trim()"
+    echo "}"
+    echo ""
+    echo "export function buildThing(input: string) {"
+    echo "  return parseThing(input).toUpperCase()"
+    echo "}"
+    echo ""
+    local i
+    for i in $(seq 1 950); do
+      echo "export const filler_${i} = ${i}"
+    done
+    echo ""
+    echo "export function renderThing() {"
+    echo "  return buildThing('demo')"
+    echo "}"
+  } > "$workspace/src/monster.ts"
+
+  printf '%s\n' \
+    '{"type":"tool_call","subtype":"completed","tool_call":{"readToolCall":{"args":{"path":"src/monster.ts"},"result":{"success":{"totalLines":960,"contentSize":300000}}}}}' \
+    '{"type":"tool_call","subtype":"completed","tool_call":{"readToolCall":{"args":{"path":"src/monster.ts"},"result":{"success":{"totalLines":960,"contentSize":300000}}}}}' \
+    | WARN_THRESHOLD=999999 ROTATE_THRESHOLD=999999 bash "$REPO_DIR/scripts/stream-parser.sh" "$workspace" >"$workspace/parser.out"
+
+  assert_contains "$workspace/parser.out" "GUTTER"
+  assert_contains "$workspace/.ralph/read-trace.tsv" "src/monster.ts"
+  assert_contains "$workspace/.ralph/.last-session.env" "RALPH_SESSION_HOT_FILE=src/monster.ts"
+  assert_contains "$workspace/.ralph/.last-session.env" "RALPH_SESSION_THRASH_PATH=src/monster.ts"
+
+  (
+    export MODEL=auto
+    export SCRIPT_DIR="$REPO_DIR/scripts"
+    # shellcheck disable=SC1090
+    source "$REPO_DIR/scripts/ralph-common.sh"
+    load_last_session_metrics "$workspace"
+    write_navigation_brief "$workspace"
+    write_session_brief "$workspace"
+    build_prompt "$workspace" 7 > "$workspace/prompt.txt"
+  )
+
+  assert_contains "$workspace/.ralph/navigation-brief.md" "Forced narrow mode: ACTIVE"
+  assert_contains "$workspace/.ralph/navigation-brief.md" "Current hot file: src/monster.ts"
+  assert_contains "$workspace/.ralph/navigation-brief.md" "sed -n"
+  assert_contains "$workspace/.ralph/session-brief.md" "## Forced Narrow Mode"
+  assert_contains "$workspace/.ralph/session-brief.md" ".ralph/navigation-brief.md"
+  assert_contains "$workspace/prompt.txt" ".ralph/navigation-brief.md"
+  assert_contains "$workspace/prompt.txt" "forced narrow mode"
+}
+
 run_dashboard_state_logic_case() {
   local fresh_workspace complete_workspace stale_workspace
   fresh_workspace="$(make_workspace)"
@@ -419,6 +476,7 @@ PY
   run_live_abort_case
   run_stop_helper_case
   run_parser_session_metadata_case
+  run_navigation_brief_case
   run_signal_timeline_case
   run_dashboard_state_logic_case
 

@@ -22,9 +22,13 @@ set -euo pipefail
 WORKSPACE="${1:-.}"
 RALPH_DIR="$WORKSPACE/.ralph"
 SIGNALS_LOG="$RALPH_DIR/signals.log"
+READ_TRACE_FILE="$RALPH_DIR/read-trace.tsv"
 
 # Ensure .ralph directory exists
 mkdir -p "$RALPH_DIR"
+if [[ ! -f "$READ_TRACE_FILE" ]]; then
+  printf 'timestamp\titeration\tpath\tbytes\tlines\tper_file_reads\twrite_calls_before_read\tthrash_hit\n' > "$READ_TRACE_FILE"
+fi
 
 # Thresholds
 WARN_THRESHOLD="${WARN_THRESHOLD:-170000}"
@@ -66,6 +70,11 @@ CURSOR_SESSION_ID=""
 CURSOR_REQUEST_ID=""
 CURSOR_PERMISSION_MODE=""
 CURSOR_MODEL="${RALPH_MODEL_RUNTIME:-unknown}"
+HOT_LARGE_READ_PATH=""
+HOT_LARGE_READ_COUNT=0
+HOT_LARGE_READ_BYTES=0
+HOT_LARGE_READ_LINES=0
+THRASH_PATH=""
 
 # Estimate initial prompt size (Ralph prompt is ~2KB + file references)
 PROMPT_CHARS=3000
@@ -437,35 +446,54 @@ track_file_read() {
     END { print count+0 }
   ' "$READS_FILE")
 
+  if [[ $per_file_count -gt $HOT_LARGE_READ_COUNT ]]; then
+    HOT_LARGE_READ_PATH="$path"
+    HOT_LARGE_READ_COUNT=$per_file_count
+    HOT_LARGE_READ_BYTES=$bytes
+    HOT_LARGE_READ_LINES=$lines
+  fi
+
   if [[ $per_file_count -ge 2 ]]; then
     LARGE_READ_REREADS=$((LARGE_READ_REREADS + 1))
   fi
 
+  local read_triggered_thrash=0
+
   if [[ $WRITE_CALLS -eq 0 && $bytes -ge $VERY_LARGE_READ_THRESHOLD_BYTES && $per_file_count -ge 2 ]]; then
     LARGE_READ_THRASH_HIT=1
+    THRASH_PATH="$path"
+    read_triggered_thrash=1
     emit_signal_once \
       "GUTTER" \
       "🚨 THRASH: very large file reread of $path (${per_file_count}x before any write)" \
       "⚠️ THRASH: very large file $path reread ${per_file_count}x before any write"
-    return
-  fi
-
-  if [[ $WRITE_CALLS -eq 0 && $per_file_count -ge $MAX_LARGE_REREADS_PER_FILE ]]; then
+  elif [[ $WRITE_CALLS -eq 0 && $per_file_count -ge $MAX_LARGE_REREADS_PER_FILE ]]; then
     LARGE_READ_THRASH_HIT=1
+    THRASH_PATH="$path"
+    read_triggered_thrash=1
     emit_signal_once \
       "GUTTER" \
       "🚨 THRASH: repeated large reread of $path (${per_file_count}x before any write)" \
       "⚠️ THRASH: $path reread ${per_file_count}x in one session before any write"
-    return
-  fi
-
-  if [[ $WRITE_CALLS -eq 0 && $LARGE_READS -ge $MAX_LARGE_READS_WITHOUT_WRITE ]]; then
+  elif [[ $WRITE_CALLS -eq 0 && $LARGE_READS -ge $MAX_LARGE_READS_WITHOUT_WRITE ]]; then
     LARGE_READ_THRASH_HIT=1
+    THRASH_PATH="$path"
+    read_triggered_thrash=1
     emit_signal_once \
       "GUTTER" \
       "🚨 THRASH: ${LARGE_READS} large reads without any write this session" \
       "⚠️ THRASH: ${LARGE_READS} large reads occurred before any write"
   fi
+
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
+    "${RALPH_ITERATION:-0}" \
+    "$path" \
+    "$bytes" \
+    "$lines" \
+    "$per_file_count" \
+    "$WRITE_CALLS" \
+    "$read_triggered_thrash" >> "$READ_TRACE_FILE"
 }
 
 write_session_metrics() {
@@ -495,6 +523,11 @@ write_session_metrics() {
     printf 'RALPH_SESSION_LARGE_READS=%q\n' "$LARGE_READS"
     printf 'RALPH_SESSION_LARGE_READ_REREADS=%q\n' "$LARGE_READ_REREADS"
     printf 'RALPH_SESSION_LARGE_READ_THRASH_HIT=%q\n' "$LARGE_READ_THRASH_HIT"
+    printf 'RALPH_SESSION_HOT_FILE=%q\n' "$HOT_LARGE_READ_PATH"
+    printf 'RALPH_SESSION_HOT_FILE_READS=%q\n' "$HOT_LARGE_READ_COUNT"
+    printf 'RALPH_SESSION_HOT_FILE_BYTES=%q\n' "$HOT_LARGE_READ_BYTES"
+    printf 'RALPH_SESSION_HOT_FILE_LINES=%q\n' "$HOT_LARGE_READ_LINES"
+    printf 'RALPH_SESSION_THRASH_PATH=%q\n' "$THRASH_PATH"
     printf 'RALPH_SESSION_PROMPT_TOKENS=%q\n' "$TOKEN_EST_PROMPT"
     printf 'RALPH_SESSION_READ_TOKENS=%q\n' "$TOKEN_EST_READ"
     printf 'RALPH_SESSION_WRITE_TOKENS=%q\n' "$TOKEN_EST_WRITE"

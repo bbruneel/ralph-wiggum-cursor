@@ -162,6 +162,20 @@ cat > .ralph/session-brief.md << 'EOF'
 
 EOF
 
+cat > .ralph/navigation-brief.md << 'EOF'
+# Ralph Navigation Brief
+
+> Auto-generated before each iteration when Ralph needs a tighter map through a large file.
+
+- Generated: not yet
+- Last session signal: NONE
+- Forced narrow mode: standby
+- Current hot file: not yet identified
+
+EOF
+
+printf 'timestamp\titeration\tpath\tbytes\tlines\tper_file_reads\twrite_calls_before_read\tthrash_hit\n' > .ralph/read-trace.tsv
+
 cat > .ralph/runtime.env << 'EOF'
 # Ralph runtime state
 RALPH_RUNTIME_STATUS=idle
@@ -222,9 +236,11 @@ echo ""
 echo "Files created:"
 echo "  • RALPH_TASK.md        - Define your task here"
 echo "  • .ralph/session-brief.md - Auto-generated restart brief (agent reads this first)"
+echo "  • .ralph/navigation-brief.md - Hot-file navigation plan for the next iteration"
 echo "  • .ralph/guardrails.md - Lessons learned (agent updates this)"
 echo "  • .ralph/progress.md   - Progress log (agent updates this)"
 echo "  • .ralph/activity.log  - Tool call log (parser updates this)"
+echo "  • .ralph/read-trace.tsv - Large-read ledger for hotspot detection"
 echo "  • .ralph/signals.log   - Signal/event history (dashboard reads this)"
 echo "  • .ralph/errors.log    - Failure log (parser updates this)"
 echo ""
