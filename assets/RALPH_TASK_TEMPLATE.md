@@ -1,9 +1,6 @@
 ---
 task: [Brief description of the task]
-completion_criteria:
-  - [Criterion 1 - must be objectively verifiable]
-  - [Criterion 2]
-  - [Criterion 3]
+test_command: "[Primary verification command, if you have one]"
 max_iterations: 50
 ---
 
@@ -39,6 +36,13 @@ The task is complete when ALL of the following are true:
 2. [ ] [Verifiable criterion 2] <!-- group: 1 -->
 3. [ ] [Verifiable criterion 3] <!-- group: 2 -->
 
+### Ralph Scaffolding Checklist
+
+- The checkbox list under `## Success Criteria` is the only progress source Ralph tracks
+- Keep each checkbox to one outcome you can verify with a command or observable result
+- Prefer 3-8 actively pending checkboxes at a time for cheaper models
+- Put manual approval/browser/deploy steps in `## Notes`, not in the tracked checklist
+
 ### Parallel Group Syntax (optional)
 
 Use `<!-- group: N -->` to control execution order in parallel mode:
@@ -69,5 +73,6 @@ When working on this task:
 3. Work on the next incomplete criterion
 4. Update `.ralph/progress.md` with your progress
 5. Commit your changes with descriptive messages
-6. When ALL criteria are met (all `[ ]` → `[x]`), output: `<ralph>COMPLETE</ralph>`
-7. If stuck on the same issue 3+ times, output: `<ralph>GUTTER</ralph>`
+6. If blocked, record the exact blocker and next command/path in `.ralph/progress.md`
+7. When ALL criteria are met (all `[ ]` → `[x]`), output: `<ralph>COMPLETE</ralph>`
+8. If stuck on the same issue 3+ times, output: `<ralph>GUTTER</ralph>`

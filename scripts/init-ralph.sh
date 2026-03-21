@@ -56,13 +56,19 @@ Describe what you want to accomplish.
 
 ## Success Criteria
 
-1. [ ] First thing to complete
-2. [ ] Second thing to complete
-3. [ ] Third thing to complete
+1. [ ] First concrete, verifiable thing to complete
+2. [ ] Second concrete, verifiable thing to complete
+3. [ ] Third concrete, verifiable thing to complete
 
 ## Context
 
 Any additional context the agent should know.
+
+## Scaffolding Notes
+
+- Ralph only tracks the checkbox list under `## Success Criteria`
+- Keep each checkbox to one outcome you can verify with a command or observable result
+- Put manual approval/browser/deploy steps here in notes, not in the tracked checklist
 EOF
   fi
   echo "   Edit RALPH_TASK.md to define your task."
@@ -98,9 +104,19 @@ cat > .ralph/guardrails.md << 'EOF'
 - **Instruction**: Run tests to verify nothing broke
 - **Added after**: Core principle
 
+### Sign: Verify Before Checkoff
+- **Trigger**: Before marking any criterion complete
+- **Instruction**: Run the verification command or confirm the concrete observable result first
+- **Added after**: Core principle
+
 ### Sign: Commit Checkpoints
 - **Trigger**: Before risky changes
 - **Instruction**: Commit current working state first
+- **Added after**: Core principle
+
+### Sign: Leave a Precise Handoff
+- **Trigger**: Before rotation or when blocked
+- **Instruction**: Record the exact next command, file, symbol, or line window in `.ralph/progress.md`
 - **Added after**: Core principle
 
 ---

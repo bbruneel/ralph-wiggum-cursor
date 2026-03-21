@@ -1,11 +1,6 @@
 ---
 task: Build a REST API for task management
 test_command: "pnpm test"
-completion_criteria:
-  - All CRUD endpoints working and tested
-  - Input validation implemented
-  - Tests passing with >80% coverage
-  - API documentation complete
 max_iterations: 50
 ---
 
@@ -64,6 +59,8 @@ Build a simple but production-ready REST API for managing tasks (todo items). Th
 ## Success Criteria
 
 The task is complete when ALL of the following are true:
+
+- Ralph tracks this checkbox list as the source of truth
 
 1. [ ] `pnpm start` runs the server without errors
 2. [ ] POST /tasks implemented (validation + tests)
@@ -131,5 +128,6 @@ When working on this task:
 4. Update `.ralph/progress.md` with your progress
 5. Commit your changes with descriptive messages
 6. Run tests frequently to verify progress
-7. When ALL criteria are met (all `[ ]` → `[x]`), output: `<ralph>COMPLETE</ralph>`
-8. If stuck on the same issue 3+ times, output: `<ralph>GUTTER</ralph>`
+7. If blocked, record the exact blocker and next command/path in `.ralph/progress.md`
+8. When ALL criteria are met (all `[ ]` → `[x]`), output: `<ralph>COMPLETE</ralph>`
+9. If stuck on the same issue 3+ times, output: `<ralph>GUTTER</ralph>`

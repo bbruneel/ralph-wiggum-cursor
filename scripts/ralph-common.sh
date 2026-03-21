@@ -54,6 +54,9 @@ NAVIGATION_WINDOW_RADIUS="${NAVIGATION_WINDOW_RADIUS:-40}"
 TASK_KEYWORD_LIMIT="${TASK_KEYWORD_LIMIT:-6}"
 TASK_SEARCH_HIT_LIMIT="${TASK_SEARCH_HIT_LIMIT:-6}"
 TARGETED_READ_WINDOW_GUIDE="${TARGETED_READ_WINDOW_GUIDE:-40-120 lines}"
+TASK_SCAFFOLD_WARN_PENDING_MAX="${TASK_SCAFFOLD_WARN_PENDING_MAX:-12}"
+TASK_SCAFFOLD_WARN_DESC_LENGTH="${TASK_SCAFFOLD_WARN_DESC_LENGTH:-160}"
+TASK_SCAFFOLD_WARN_MANUAL_LIMIT="${TASK_SCAFFOLD_WARN_MANUAL_LIMIT:-3}"
 
 # Sequential run locking
 SEQUENTIAL_LOCK_DIR="${SEQUENTIAL_LOCK_DIR:-.ralph/locks/sequential.lock}"
@@ -1294,7 +1297,7 @@ write_session_brief() {
   local counts done_count total_count remaining_count
   local next_task next_id next_status next_desc next_line=""
   local pending_sample completed_sample dirty_files recent_errors large_files carried_notes
-  local hotspot_summary navigation_target forced_narrow=0
+  local hotspot_summary navigation_target forced_narrow=0 scaffolding_warnings
 
   counts=$(count_criteria "$workspace")
   done_count="${counts%%:*}"
@@ -1322,6 +1325,7 @@ write_session_brief() {
   large_files=$(list_large_context_files "$workspace")
   hotspot_summary=$(summarize_recent_read_hotspots "$workspace" "$READ_HOTSPOT_LIMIT")
   navigation_target=$(resolve_navigation_target "$workspace")
+  scaffolding_warnings=$(collect_task_scaffolding_warnings "$workspace")
 
   if should_force_narrow_mode "$workspace"; then
     forced_narrow=1
@@ -1374,6 +1378,15 @@ write_session_brief() {
     echo "- If you reread the same huge file twice before writing code, you are stuck: switch to \`rg -n\` / \`sed -n\` or move on."
     echo ""
 
+    if [[ -n "$scaffolding_warnings" ]]; then
+      echo "## Task Scaffolding Warnings"
+      echo ""
+      while IFS= read -r item; do
+        [[ -n "$item" ]] && echo "$item"
+      done <<< "$scaffolding_warnings"
+      echo ""
+    fi
+
     if [[ "$forced_narrow" -eq 1 ]]; then
       echo "## Forced Narrow Mode"
       echo ""
@@ -1396,6 +1409,13 @@ write_session_brief() {
     echo "- Search inside those files with \`rg -n -i 'keyword' path...\` before reading anything large."
     echo "- Read one bounded window at a time (${TARGETED_READ_WINDOW_GUIDE}) with \`sed -n 'start,endp' path\`."
     echo "- If the hit set is still broad, tighten the search instead of opening another large file."
+    echo ""
+
+    echo "## If You Stall"
+    echo ""
+    echo "- After two searches and one bounded read, either make the smallest useful edit/test change or record the next exact command/path in \`.ralph/progress.md\`."
+    echo "- Never check off a criterion on intent alone. Verify it with a command or concrete observable result first."
+    echo "- If the blocker is manual or external, record it precisely in \`.ralph/progress.md\` and prefer \`<ralph>GUTTER</ralph>\` over more blind retries."
     echo ""
 
     echo "## Immediate Focus"
@@ -1827,9 +1847,19 @@ EOF
 - **Instruction**: Run tests to verify nothing broke
 - **Added after**: Core principle
 
+### Sign: Verify Before Checkoff
+- **Trigger**: Before marking any criterion complete
+- **Instruction**: Run the verification command or confirm the concrete observable result first
+- **Added after**: Core principle
+
 ### Sign: Commit Checkpoints
 - **Trigger**: Before risky changes
 - **Instruction**: Commit current working state first
+- **Added after**: Core principle
+
+### Sign: Leave a Precise Handoff
+- **Trigger**: Before rotation or when blocked
+- **Instruction**: Record the exact next command, file, symbol, or line window in `.ralph/progress.md`
 - **Added after**: Core principle
 
 ---
@@ -2055,6 +2085,142 @@ refresh_task_cache() {
 }
 
 # =============================================================================
+# TASK SCAFFOLDING VALIDATION
+# =============================================================================
+
+count_total_criteria() {
+  local workspace="${1:-.}"
+  local counts total
+
+  counts=$(count_criteria "$workspace" 2>/dev/null || echo "0:0")
+  total="${counts##*:}"
+  [[ "$total" =~ ^[0-9]+$ ]] || total=0
+  printf '%s\n' "$total"
+}
+
+count_pending_criteria() {
+  local workspace="${1:-.}"
+  local counts done_count total_count pending_count
+
+  counts=$(count_criteria "$workspace" 2>/dev/null || echo "0:0")
+  done_count="${counts%%:*}"
+  total_count="${counts##*:}"
+
+  [[ "$done_count" =~ ^[0-9]+$ ]] || done_count=0
+  [[ "$total_count" =~ ^[0-9]+$ ]] || total_count=0
+
+  pending_count=$((total_count - done_count))
+  if [[ "$pending_count" -lt 0 ]]; then
+    pending_count=0
+  fi
+
+  printf '%s\n' "$pending_count"
+}
+
+task_file_has_success_criteria_heading() {
+  local task_file="$1"
+  grep -qiE '^#{1,6}[[:space:]]+Success Criteria([[:space:]]|$)' "$task_file" 2>/dev/null
+}
+
+task_file_has_test_command() {
+  local task_file="$1"
+
+  awk '
+    NR == 1 && $0 == "---" { in_frontmatter = 1; next }
+    in_frontmatter && $0 == "---" { exit found ? 0 : 1 }
+    in_frontmatter && $0 ~ /^[[:space:]]*test_command[[:space:]]*:/ { found = 1 }
+    END { exit found ? 0 : 1 }
+  ' "$task_file" >/dev/null 2>&1
+}
+
+list_manual_pending_task_hits() {
+  local workspace="${1:-.}"
+  local limit="${2:-$TASK_SCAFFOLD_WARN_MANUAL_LIMIT}"
+
+  list_task_descriptions "$workspace" pending 2>/dev/null \
+    | grep -Ei '(manual|approval|approve|ask[[:space:]]+user|wait[[:space:]]+for|human|browser|click|log[[:space:]]*in|login|sign[[:space:]]*in|deploy[[:space:]]+to[[:space:]]+production|production[[:space:]]+deploy)' \
+    | sed -n "1,${limit}p"
+}
+
+collect_task_scaffolding_warnings() {
+  local workspace="${1:-.}"
+  local task_file="$workspace/RALPH_TASK.md"
+  local pending_count next_desc manual_hits next_task next_id next_status
+
+  [[ -f "$task_file" ]] || return 0
+
+  if grep -Eq '^[[:space:]]*completion_criteria[[:space:]]*:' "$task_file" 2>/dev/null; then
+    echo "- Remove or ignore frontmatter \`completion_criteria\`. Ralph only tracks the checkbox list under \`## Success Criteria\`."
+  fi
+
+  if ! task_file_has_success_criteria_heading "$task_file"; then
+    echo "- Add a \`## Success Criteria\` heading so the tracked checklist is easy for cheaper models to find."
+  fi
+
+  if ! task_file_has_test_command "$task_file"; then
+    echo "- Add a frontmatter \`test_command\` or name another repeatable verification command in a checkbox so Ralph can verify progress instead of guessing."
+  fi
+
+  pending_count=$(count_pending_criteria "$workspace")
+  if [[ "$pending_count" -gt "$TASK_SCAFFOLD_WARN_PENDING_MAX" ]]; then
+    echo "- There are $pending_count pending criteria. Smaller models do better when only the next 3-8 checkboxes are actively in play."
+  fi
+
+  next_task=$(get_next_task_info "$workspace")
+  if [[ -n "$next_task" ]]; then
+    IFS='|' read -r next_id next_status next_desc <<< "$next_task"
+  else
+    next_desc=$(sample_task_descriptions "$workspace" pending 1)
+  fi
+
+  if [[ -n "$next_desc" ]] && [[ ${#next_desc} -gt "$TASK_SCAFFOLD_WARN_DESC_LENGTH" ]]; then
+    echo "- The next unchecked criterion is ${#next_desc} characters long. Split it into one concrete, verifiable outcome."
+  fi
+
+  manual_hits=$(list_manual_pending_task_hits "$workspace")
+  if [[ -n "$manual_hits" ]]; then
+    while IFS= read -r item; do
+      [[ -n "$item" ]] && echo "- Manual or human-dependent criterion detected: $item"
+    done <<< "$manual_hits"
+    echo "- Move manual/browser/approval work into notes or out-of-scope; keep the success checklist automatable."
+  fi
+}
+
+print_task_scaffolding_warnings() {
+  local workspace="${1:-.}"
+  local warnings
+
+  warnings=$(collect_task_scaffolding_warnings "$workspace")
+  [[ -n "$warnings" ]] || return 0
+
+  echo "⚠️  Task scaffolding warnings:"
+  while IFS= read -r line; do
+    [[ -n "$line" ]] && echo "$line"
+  done <<< "$warnings"
+  echo ""
+}
+
+validate_task_scaffolding() {
+  local workspace="${1:-.}"
+  local total_count
+
+  total_count=$(count_total_criteria "$workspace")
+  if [[ "$total_count" -le 0 ]]; then
+    echo "❌ RALPH_TASK.md has no checkbox criteria Ralph can track."
+    echo ""
+    echo "Add a checklist under a \`## Success Criteria\` heading, for example:"
+    echo "  ## Success Criteria"
+    echo "  1. [ ] Implement the smallest verifiable behavior"
+    echo "  2. [ ] Run the verification command and confirm the expected output"
+    echo ""
+    echo "Ralph only tracks actual checkbox list items like \`- [ ]\` or \`1. [ ]\`."
+    return 1
+  fi
+
+  return 0
+}
+
+# =============================================================================
 # PROMPT BUILDING
 # =============================================================================
 
@@ -2101,21 +2267,26 @@ Ralph's strength is state-in-git, not LLM memory. Commit early and often:
    Always describe what you actually did - never use placeholders like '<description>'
 2. After any significant code change (even partial): commit with descriptive message
 3. Before any risky refactor: commit current state as checkpoint
-4. Push after every 2-3 commits: \`git push\`
+4. Push only if a remote already exists and pushing is already part of the repo workflow
+   - Check with \`git remote -v\`
+   - If there is no remote or auth is missing, skip pushing instead of burning iterations on setup
 
 If you get rotated, the next agent picks up from your last commit. Your commits ARE your memory.
 
 ## Task Execution
 
-1. Work on the next unchecked criterion named in \`.ralph/session-brief.md\`
-2. Run tests after changes (check RALPH_TASK.md for test_command)
+1. Treat the next unchecked criterion named in \`.ralph/session-brief.md\` as the primary objective for this iteration
+   - Do not widen scope unless adjacent work is directly required to satisfy that checkbox
+2. Run the explicit \`test_command\` when present; otherwise use the most direct repeatable verification command from the criterion itself
 3. **Mark completed criteria**: Edit RALPH_TASK.md and change \`[ ]\` to \`[x]\`
    - Example: \`- [ ] Implement parser\` becomes \`- [x] Implement parser\`
    - This is how progress is tracked - YOU MUST update the file
+   - Never mark a criterion complete on intent alone; verify it first with a command or concrete observable result
 4. Update \`.ralph/progress.md\` with what you accomplished
    - Keep it concise and high-signal
    - Do not paste long command output or rebuild giant historical logs
    - Preserve the authoritative top summary block when editing
+   - If blocked, leave the exact blocker plus the next command, file, or line window the next agent should try
 5. When ALL criteria show \`[x]\`: output \`<ralph>COMPLETE</ralph>\`
 6. If stuck 3+ times on same issue: output \`<ralph>GUTTER</ralph>\`
 
@@ -2134,6 +2305,14 @@ If you get rotated, the next agent picks up from your last commit. Your commits 
 - In forced narrow mode, do not full-read the hot file at all unless you are editing it immediately
 - In forced narrow mode, after one or two narrow reads you must either edit code/tests or update \`.ralph/progress.md\` with the next exact slice
 - If context is getting tight and you have not written meaningful code yet, stop discovery, update \`.ralph/progress.md\` with the next concrete target, and let rotation happen
+
+## Stuck Recovery Ladder
+
+If progress stalls, do these in order instead of looping:
+1. Tighten the search term, regex, directory, or symbol target instead of opening more large files
+2. After one or two narrow reads, make the smallest useful edit or run the smallest useful verification command
+3. If blocked by a missing dependency, manual step, missing credential, or external system, record the exact blocker and next command/path in \`.ralph/progress.md\`
+4. If you still cannot advance after that, output \`<ralph>GUTTER</ralph>\` instead of spinning
 
 ## Learning from Failures
 
@@ -2156,6 +2335,7 @@ You may receive a warning that context is running low. When you see it:
 2. Commit and push your changes
 3. Update .ralph/progress.md with what you accomplished and what's next
    - Keep the live summary concise so the next agent can restart cheaply
+   - Leave an exact next command, path, or line range when the task is mid-flight
 4. You will be rotated to a fresh agent that continues your work
 
 Begin by reading the state files.
@@ -2611,19 +2791,25 @@ check_prerequisites() {
     return 1
   fi
   
+  # Check for git repo
+  if ! git -C "$workspace" rev-parse --git-dir > /dev/null 2>&1; then
+    echo "❌ Not a git repository"
+    echo "   Ralph requires git for state persistence."
+    return 1
+  fi
+
+  if ! validate_task_scaffolding "$workspace"; then
+    return 1
+  fi
+
+  print_task_scaffolding_warnings "$workspace"
+
   # Check for cursor-agent CLI
   if ! command -v cursor-agent &> /dev/null; then
     echo "❌ cursor-agent CLI not found"
     echo ""
     echo "Install via:"
     echo "  curl https://cursor.com/install -fsS | bash"
-    return 1
-  fi
-  
-  # Check for git repo
-  if ! git -C "$workspace" rev-parse --git-dir > /dev/null 2>&1; then
-    echo "❌ Not a git repository"
-    echo "   Ralph requires git for state persistence."
     return 1
   fi
   

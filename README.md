@@ -143,17 +143,9 @@ The installer will offer to install gum automatically. You can also:
 - Skip the prompt and auto-install: `curl ... | INSTALL_GUM=1 bash`
 - Install manually: `brew install gum` (macOS) or see [gum installation](https://github.com/charmbracelet/gum#installation)
 
-With gum, you get a beautiful interactive menu for selecting models and options:
+With gum, you get a beautiful interactive menu for iterations and options. Ralph is intentionally locked to Cursor Auto mode:
 
 ```
-? Select model:
-  ◉ auto
-  ◯ opus-4.5-thinking
-  ◯ sonnet-4.5-thinking
-  ◯ gpt-5.2-high
-  ◯ composer-1
-  ◯ Custom...
-
 ? Max iterations: 20
 
 ? Options:
@@ -208,6 +200,8 @@ Build a REST API with user management.
 ```
 
 **Important:** Use `[ ]` checkboxes. Ralph tracks completion by counting unchecked boxes.
+The checkbox list under `## Success Criteria` is the source of truth Ralph tracks.
+Keep each checkbox atomic and objectively verifiable, and keep manual approval/browser/deploy steps out of the tracked checklist.
 
 ### 4. Start the Loop
 
@@ -279,7 +273,7 @@ cat .ralph/errors.log
 
 Options:
   -n, --iterations N     Max iterations (default: 20)
-  -m, --model MODEL      Model to use (default: auto)
+  -m, --model MODEL      Model to use (must be: auto)
   --branch NAME          Sequential: create/work on branch; Parallel: integration branch name
   --pr                   Sequential: open PR (requires --branch); Parallel: open ONE integration PR (branch optional)
   --parallel             Run tasks in parallel with worktrees
@@ -294,8 +288,8 @@ Options:
 # Scripted PR workflow
 ./ralph-loop.sh --branch feature/api --pr -y
 
-# Use a different model with more iterations
-./ralph-loop.sh -n 50 -m gpt-5.2-high
+# Explicitly request Cursor Auto with more iterations
+./ralph-loop.sh -n 50 -m auto
 
 # Run 4 agents in parallel
 ./ralph-loop.sh --parallel --max-parallel 4
@@ -640,10 +634,10 @@ Configuration is set via command-line flags or environment variables:
 
 ```bash
 # Via flags (recommended)
-./ralph-loop.sh -n 50 -m gpt-5.2-high
+./ralph-loop.sh -n 50 -m auto
 
 # Via environment
-RALPH_MODEL=gpt-5.2-high MAX_ITERATIONS=50 ./ralph-loop.sh
+RALPH_MODEL=auto MAX_ITERATIONS=50 ./ralph-loop.sh
 ```
 
 Default thresholds in `ralph-common.sh`:
@@ -685,6 +679,8 @@ Check if criteria are too vague. Each criterion should be:
 - Specific and testable
 - Achievable in a single iteration
 - Not dependent on manual steps
+- Backed by a `test_command` or another repeatable verification command
+- Stored only once in the checkbox list under `## Success Criteria`
 
 ## Workflows
 

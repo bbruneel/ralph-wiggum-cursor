@@ -413,6 +413,95 @@ EOF
   assert_contains "$workspace/prompt.txt" "bounded window (40-120 lines)"
 }
 
+run_task_validation_case() {
+  local workspace fakebin
+  workspace="$(mktemp -d)"
+  git -C "$workspace" init -q
+
+  cat > "$workspace/RALPH_TASK.md" <<'EOF'
+---
+task: Broken task
+test_command: "true"
+---
+
+# Task
+
+This file has no tracked checklist yet.
+EOF
+
+  fakebin="$workspace/fakebin"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/cursor-agent" <<'EOF'
+#!/bin/bash
+exit 0
+EOF
+  chmod +x "$fakebin/cursor-agent"
+
+  if (
+    export PATH="$fakebin:$PATH"
+    export MODEL=auto
+    export SCRIPT_DIR="$REPO_DIR/scripts"
+    # shellcheck disable=SC1090
+    source "$REPO_DIR/scripts/ralph-common.sh"
+    check_prerequisites "$workspace"
+  ) >"$workspace/check.out" 2>&1; then
+    echo "Assertion failed: check_prerequisites must reject task files with no checkbox criteria" >&2
+    exit 1
+  fi
+
+  assert_contains "$workspace/check.out" "no checkbox criteria Ralph can track"
+  assert_contains "$workspace/check.out" "## Success Criteria"
+}
+
+run_task_scaffolding_warning_case() {
+  local workspace
+  workspace="$(mktemp -d)"
+  git -C "$workspace" init -q
+
+  cat > "$workspace/RALPH_TASK.md" <<'EOF'
+---
+task: Overly broad task
+---
+
+# Task
+
+## Success Criteria
+
+1. [ ] Ask user for approval in the browser after clicking through three screens and manually verifying the production behavior still looks correct for every role in the system
+2. [ ] Finish criterion two
+3. [ ] Finish criterion three
+4. [ ] Finish criterion four
+5. [ ] Finish criterion five
+6. [ ] Finish criterion six
+7. [ ] Finish criterion seven
+8. [ ] Finish criterion eight
+9. [ ] Finish criterion nine
+10. [ ] Finish criterion ten
+11. [ ] Finish criterion eleven
+12. [ ] Finish criterion twelve
+13. [ ] Finish criterion thirteen
+EOF
+
+  (
+    export MODEL=auto
+    export SCRIPT_DIR="$REPO_DIR/scripts"
+    # shellcheck disable=SC1090
+    source "$REPO_DIR/scripts/ralph-common.sh"
+    init_ralph_dir "$workspace"
+    write_session_brief "$workspace"
+    build_prompt "$workspace" 3 > "$workspace/prompt.txt"
+  )
+
+  assert_contains "$workspace/.ralph/session-brief.md" "## Task Scaffolding Warnings"
+  assert_contains "$workspace/.ralph/session-brief.md" "test_command"
+  assert_contains "$workspace/.ralph/session-brief.md" "There are 13 pending criteria"
+  assert_contains "$workspace/.ralph/session-brief.md" "Manual or human-dependent criterion detected"
+  assert_contains "$workspace/.ralph/session-brief.md" "## If You Stall"
+  assert_contains "$workspace/prompt.txt" "## Stuck Recovery Ladder"
+  assert_contains "$workspace/prompt.txt" "Never mark a criterion complete on intent alone"
+  assert_contains "$workspace/prompt.txt" "Push only if a remote already exists"
+}
+
 run_dashboard_state_logic_case() {
   local fresh_workspace complete_workspace stale_workspace
   fresh_workspace="$(make_workspace)"
@@ -537,6 +626,8 @@ PY
   run_stop_helper_case
   run_parser_session_metadata_case
   run_navigation_brief_case
+  run_task_validation_case
+  run_task_scaffolding_warning_case
   run_signal_timeline_case
   run_dashboard_state_logic_case
 

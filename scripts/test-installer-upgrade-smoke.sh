@@ -16,7 +16,7 @@ assert_contains() {
 }
 
 main() {
-  local workspace install_log
+  local workspace install_log fresh_workspace fresh_install_log
   workspace="$(mktemp -d)"
   install_log="$workspace/install.log"
 
@@ -62,6 +62,25 @@ EOF
 
   assert_contains "$install_log" "Preserved .ralph/progress.md"
   assert_contains "$install_log" "Preserved RALPH_TASK.md"
+
+  fresh_workspace="$(mktemp -d)"
+  fresh_install_log="$fresh_workspace/install.log"
+  git -C "$fresh_workspace" init -q
+
+  (
+    cd "$fresh_workspace"
+    INSTALL_GUM=0 \
+    INSTALL_TEXTUAL=0 \
+    REPO_RAW="file://$REPO_DIR" \
+    bash "$REPO_DIR/install.sh" >"$fresh_install_log"
+  )
+
+  assert_contains "$fresh_workspace/.ralph/progress.md" "RALPH_COMPACT_KEEP_START"
+  assert_contains "$fresh_workspace/RALPH_TASK.md" "## Scaffolding Notes"
+  if grep -q "completion_criteria:" "$fresh_workspace/RALPH_TASK.md"; then
+    echo "Assertion failed: fresh RALPH_TASK.md should not use duplicate completion_criteria frontmatter" >&2
+    exit 1
+  fi
 
   echo "installer upgrade smoke test passed"
 }
