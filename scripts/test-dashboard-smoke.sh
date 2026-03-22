@@ -174,6 +174,41 @@ run_tool_interaction_counter_case() {
   assert_contains "$dedupe_workspace/.ralph/.last-session.env" "RALPH_SESSION_TOOL_OVERHEAD_TOKENS=12"
 }
 
+run_live_metric_flush_case() {
+  local workspace fifo parser_pid writer_pid attempt
+  workspace="$(mktemp -d)"
+  mkdir -p "$workspace/.ralph"
+  fifo="$workspace/parser.fifo"
+  mkfifo "$fifo"
+
+  WARN_THRESHOLD=999999 ROTATE_THRESHOLD=999999 \
+    bash "$REPO_DIR/scripts/stream-parser.sh" "$workspace" <"$fifo" >"$workspace/parser.out" &
+  parser_pid=$!
+
+  {
+    printf '%s\n' \
+      '{"type":"tool_call","subtype":"completed","tool_call":{"readToolCall":{"args":{"path":"src/demo.ts"},"result":{"success":{"totalLines":50,"contentSize":1800}}}}}'
+    sleep 1
+  } >"$fifo" &
+  writer_pid=$!
+
+  for attempt in $(seq 1 20); do
+    if [[ -f "$workspace/.ralph/.last-session.env" ]] && \
+      grep -Fq "RALPH_SESSION_READ_CALLS=1" "$workspace/.ralph/.last-session.env"; then
+      break
+    fi
+    sleep 0.1
+  done
+
+  assert_contains "$workspace/.ralph/.last-session.env" "RALPH_SESSION_READ_CALLS=1"
+  assert_contains "$workspace/.ralph/.last-session.env" "RALPH_SESSION_BYTES_READ=1800"
+  assert_contains "$workspace/.ralph/.last-session.env" "RALPH_SESSION_TOOL_CALLS=1"
+
+  wait "$writer_pid"
+  wait "$parser_pid"
+  rm -f "$fifo"
+}
+
 run_stop_helper_case() {
   local workspace worker_pid child_pid lock_dir
   workspace="$(make_workspace)"
@@ -761,6 +796,7 @@ PY
     '{"type":"assistant","message":{"content":[{"text":"<ralph>GUTTER</ralph>"}]}}'
 
   run_tool_interaction_counter_case
+  run_live_metric_flush_case
 
   run_parser_case \
     "defer" \

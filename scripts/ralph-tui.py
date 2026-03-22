@@ -603,6 +603,10 @@ def session_telemetry(session: dict[str, str]) -> SessionTelemetry:
     )
 
 
+def current_session_telemetry(state: DashboardState) -> SessionTelemetry:
+    return session_telemetry(current_session_metadata(state))
+
+
 def select_task_file(workspace: Path) -> Path:
     alt = workspace / "ralph-tasks.md"
     if alt.exists():
@@ -1161,7 +1165,7 @@ def render_progress_bar(done_count: int, total_count: int, width: int = 20) -> s
 
 
 def render_snapshot(state: DashboardState) -> str:
-    telemetry = session_telemetry(state.session)
+    telemetry = current_session_telemetry(state)
     token_rows = token_mix_rows(telemetry)
     token_total = sum(value for _, value in token_rows)
     lines = [
@@ -2016,7 +2020,12 @@ def launch_textual_dashboard(workspace: Path, mode: str, child_args: list[str]) 
             margin-right: 1;
         }
 
+        #hero-card {
+            width: 2fr;
+        }
+
         #telemetry-card {
+            width: 1fr;
             margin-right: 0;
         }
 
@@ -2288,7 +2297,6 @@ def launch_textual_dashboard(workspace: Path, mode: str, child_args: list[str]) 
                 with Vertical(id="cards"):
                     with Horizontal(id="cards-top"):
                         yield Static(classes="card", id="hero-card")
-                        yield Static(classes="card", id="progress-card")
                         yield Static(classes="card", id="telemetry-card")
                     with Horizontal(id="cards-bottom"):
                         yield Static(classes="card", id="feedback-card")
@@ -2776,7 +2784,7 @@ def launch_textual_dashboard(workspace: Path, mode: str, child_args: list[str]) 
                 )
                 return
             if intent.kind == "hot":
-                telemetry = session_telemetry(self.last_state.session)
+                telemetry = current_session_telemetry(self.last_state)
                 target = telemetry.hot_file or telemetry.thrash_path
                 if not target:
                     self.set_note("No hot file or thrash path is available yet.")
@@ -2813,11 +2821,12 @@ def launch_textual_dashboard(workspace: Path, mode: str, child_args: list[str]) 
 
         def update_cards(self) -> None:
             state = self.last_state
-            telemetry = session_telemetry(state.session)
+            telemetry = current_session_telemetry(state)
             feedback_sources = build_feedback_sources(state)
             mascot, mood, mood_color = mood_snapshot(state)
             freshness = format_freshness(state)
             pulse_frame, pulse_label, pulse_color = dashboard_activity_indicator(state, self.tick)
+            progress_bar = render_progress_bar(state.done_count, state.total_count, width=18)
             layout = (
                 f"buddy {VIEW_LABELS[self.current_companion_view()].lower()}"
                 if self.split_mode
@@ -2831,7 +2840,9 @@ def launch_textual_dashboard(workspace: Path, mode: str, child_args: list[str]) 
                 Text(
                     "Status: "
                     f"{state.runtime['RALPH_RUNTIME_STATUS']}  "
-                    f"Iteration: {state.runtime['RALPH_RUNTIME_ITERATION']}",
+                    f"Iteration: {state.runtime['RALPH_RUNTIME_ITERATION']}  "
+                    f"Mode: {state.runtime['RALPH_RUNTIME_MODE']}  "
+                    f"Model: {resolved_model_label(state)}",
                     style="#bde0fe",
                 ),
                 Text(
@@ -2840,14 +2851,32 @@ def launch_textual_dashboard(workspace: Path, mode: str, child_args: list[str]) 
                     overflow="ellipsis",
                 ),
                 Text.assemble(
-                    ("Pulse: ", "#f7f4ea"),
+                    ("Live: ", "#f7f4ea"),
                     (pulse_frame, f"bold {pulse_color}"),
                     (f" {pulse_label}", pulse_color),
+                    (f"  |  {freshness}", "#f7f4ea"),
                 ),
-                Text(f"Freshness: {freshness}  |  Layout: {layout}", style="#f7f4ea"),
+                Text(
+                    "Checklist: "
+                    f"{state.done_count}/{state.total_count}  "
+                    f"{progress_bar}  "
+                    f"remaining {state.remaining_count}",
+                    style="#f7f4ea",
+                ),
+                Text(
+                    "Budget: "
+                    f"{state.token_count}/{TOKEN_BUDGET} ({state.token_pct}%)  "
+                    f"health {state.health_label}",
+                    style="#ffd166",
+                ),
+                Text(
+                    "Next: " + state.next_task,
+                    style="#f7f4ea",
+                    overflow="ellipsis",
+                ),
                 Text(
                     "Event: "
-                    f"{state.runtime['RALPH_RUNTIME_LAST_EVENT']}",
+                    f"{state.runtime['RALPH_RUNTIME_LAST_EVENT']}  |  Layout: {layout}",
                     style="#f7f4ea",
                     overflow="ellipsis",
                 ),
@@ -2856,28 +2885,6 @@ def launch_textual_dashboard(workspace: Path, mode: str, child_args: list[str]) 
                     f"{state.runtime['RALPH_RUNTIME_UPDATED_AT']}",
                     style="dim",
                 ),
-            )
-
-            progress_table = Table.grid(expand=True)
-            progress_table.add_column(justify="left")
-            progress_table.add_column(justify="right")
-            progress_table.add_row(
-                f"Criteria  {state.done_count}/{state.total_count}",
-                render_progress_bar(state.done_count, state.total_count, width=18),
-            )
-            progress_table.add_row("Remaining", str(state.remaining_count))
-            progress_table.add_row(
-                "Tokens",
-                (
-                    f"{render_progress_bar(state.token_count, TOKEN_BUDGET, width=18)} "
-                    f"{state.token_pct}%"
-                ),
-            )
-            progress_table.add_row("Health", state.health_label)
-            progress_table.add_row("Filter", FILTER_LABELS[self.active_file_view().current_filter_mode()])
-            progress_table.add_row(
-                "Next",
-                state.next_task[:28] + ("..." if len(state.next_task) > 28 else ""),
             )
 
             telemetry_table = Table.grid(expand=True)
@@ -2892,31 +2899,32 @@ def launch_textual_dashboard(workspace: Path, mode: str, child_args: list[str]) 
                 f"{telemetry.write_calls} / {format_bytes(telemetry.bytes_written)}",
             )
             telemetry_table.add_row(
-                "Shell",
-                f"{telemetry.shell_calls} / {format_bytes(telemetry.shell_output_chars)}",
+                "Edits",
+                f"{telemetry.work_write_calls} tool / {telemetry.shell_work_edit_calls} shell",
             )
             telemetry_table.add_row(
-                "Assistant",
-                f"{format_bytes(telemetry.assistant_chars)} / {format_count(telemetry.assistant_tokens)} tok",
+                "Shell",
+                f"{telemetry.shell_calls} / {format_bytes(telemetry.shell_output_chars)}",
             )
             telemetry_table.add_row(
                 "Tools",
                 f"{telemetry.tool_calls} total / {telemetry.work_edit_calls} work edits",
             )
             telemetry_table.add_row(
-                "Shell edits",
-                f"{telemetry.shell_edit_calls} cmds / {telemetry.shell_work_edit_calls} work",
+                "Assistant",
+                f"{format_bytes(telemetry.assistant_chars)} / {format_count(telemetry.assistant_tokens)} tok",
             )
             telemetry_table.add_row(
-                "Large reads",
+                "Token mix",
                 (
-                    f"{telemetry.large_reads} / rereads {telemetry.large_read_rereads}"
-                    + (" / thrash" if telemetry.large_read_thrash_hit else "")
+                    f"read {format_count(telemetry.read_tokens)}  "
+                    f"write {format_count(telemetry.write_tokens)}  "
+                    f"shell {format_count(telemetry.shell_tokens)}"
                 ),
             )
             if telemetry.hot_file:
                 telemetry_table.add_row(
-                    "Hot file",
+                    "Hot path",
                     clip_middle(
                         f"{telemetry.hot_file} x{telemetry.hot_file_reads} "
                         f"({format_bytes(telemetry.hot_file_bytes)})",
@@ -2924,7 +2932,19 @@ def launch_textual_dashboard(workspace: Path, mode: str, child_args: list[str]) 
                     ),
                 )
             elif telemetry.thrash_path:
-                telemetry_table.add_row("Thrash path", clip_middle(telemetry.thrash_path, width=34))
+                telemetry_table.add_row("Hot path", clip_middle(telemetry.thrash_path, width=34))
+            if telemetry.large_reads or telemetry.large_read_rereads or telemetry.large_read_thrash_hit:
+                telemetry_table.add_row(
+                    "Large reads",
+                    (
+                        f"{telemetry.large_reads} / rereads {telemetry.large_read_rereads}"
+                        + (" / thrash" if telemetry.large_read_thrash_hit else "")
+                    ),
+                )
+            telemetry_table.add_row(
+                "View filter",
+                FILTER_LABELS[self.active_file_view().current_filter_mode()],
+            )
 
             feedback_table = Table(
                 expand=True,
@@ -2947,9 +2967,6 @@ def launch_textual_dashboard(workspace: Path, mode: str, child_args: list[str]) 
 
             self.query_one("#hero-card", Static).update(
                 Panel(hero_lines, title="Mission Control", border_style=mood_color)
-            )
-            self.query_one("#progress-card", Static).update(
-                Panel(progress_table, title="Progress", border_style="#f4a261")
             )
             self.query_one("#telemetry-card", Static).update(
                 Panel(telemetry_table, title="Agent IO", border_style="#e9c46a")

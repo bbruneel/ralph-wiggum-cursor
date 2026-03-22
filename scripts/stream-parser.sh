@@ -858,6 +858,11 @@ write_session_metrics() {
     printf 'RALPH_SESSION_TOOL_OVERHEAD_TOKENS=%q\n' "$((TOOL_CALLS * 12))"
   } > "$tmp_file"
 
+  if [[ -f "$summary_file" ]] && cmp -s "$tmp_file" "$summary_file"; then
+    rm -f "$tmp_file"
+    return
+  fi
+
   mv "$tmp_file" "$summary_file"
 }
 
@@ -1202,6 +1207,7 @@ main() {
   
   while IFS= read -r line; do
     process_line "$line"
+    write_session_metrics
     
     # Log token status every 30 seconds
     local now=$(date +%s)

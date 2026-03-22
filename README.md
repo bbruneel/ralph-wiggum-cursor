@@ -227,7 +227,7 @@ Ralph will:
 
 This opens the Textual dashboard with:
 - a dense cockpit header tuned for wide laptop terminals
-- task progress bars, token mix, and agent I/O telemetry sourced from `.ralph/.last-session.env`, including shell edit counts
+- mission control that folds task progress into the top-line run summary plus live agent I/O telemetry from `.ralph/.last-session.env`
 - a feedback radar that shows the latest pulse from activity, progress, tasks, signals, errors, and console at the same time
 - automatic split view on roomy terminals so the main pane and a live buddy pane stay visible together
 - a Frogmouth-style command bar for quick navigation and pane search
