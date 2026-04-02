@@ -1333,7 +1333,8 @@ def require_textual() -> None:
         print("❌ The Ralph dashboard now uses Python + Textual.", file=sys.stderr)
         print("", file=sys.stderr)
         print("Install the dependency with:", file=sys.stderr)
-        print(f"  {python_bin} -m pip install textual", file=sys.stderr)
+        print("  uv add textual", file=sys.stderr)
+        print(f"  (fallback: {python_bin} -m pip install textual)", file=sys.stderr)
         print("", file=sys.stderr)
         print("Then rerun Ralph with --dashboard.", file=sys.stderr)
         raise SystemExit(1) from exc

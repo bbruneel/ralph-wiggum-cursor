@@ -2945,7 +2945,8 @@ import sys
 print(sys.executable)
 PY
 )"
-    echo "   Install via: $python_bin -m pip install textual"
+    echo "   Install via: uv add textual"
+    echo "               (fallback: $python_bin -m pip install textual)"
     return 1
   fi
 

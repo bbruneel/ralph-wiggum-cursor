@@ -88,13 +88,20 @@ PY
     elif [[ "${INSTALL_TEXTUAL:-}" == "0" ]]; then
       SHOULD_INSTALL_TEXTUAL="n"
     else
-      read -p "   Install textual with pip? [y/N] " -n 1 -r < /dev/tty
+      read -p "   Install textual with uv (fallback: pip)? [y/N] " -n 1 -r < /dev/tty
       echo
       SHOULD_INSTALL_TEXTUAL="$REPLY"
     fi
 
     if [[ "$SHOULD_INSTALL_TEXTUAL" =~ ^[Yy]$ ]]; then
-      python3 -m pip install --user textual || echo "   ⚠️  Could not install textual automatically."
+      if command -v uv &> /dev/null; then
+        if ! uv add textual; then
+          echo "   ⚠️  uv add failed; trying pip fallback..."
+          python3 -m pip install --user textual || echo "   ⚠️  Could not install textual automatically."
+        fi
+      else
+        python3 -m pip install --user textual || echo "   ⚠️  Could not install textual automatically."
+      fi
     fi
     echo ""
   fi

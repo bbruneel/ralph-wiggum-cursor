@@ -99,7 +99,7 @@ This version makes restart state explicit and portable:
 | **Git repo** | `git status` works | `git init` |
 | **cursor-agent CLI** | `which cursor-agent` | `curl https://cursor.com/install -fsS \| bash` |
 | **gum** (optional) | `which gum` | Installer offers to install, or `brew install gum` |
-| **python3 + textual** (dashboard only) | `python3 -c "import textual"` | Installer offers to install, or `python3 -m pip install textual` |
+| **python3 + textual** (dashboard only) | `python3 -c "import textual"` | Installer offers to install, or `uv add textual` |
 
 ## Quick Start
 
@@ -107,7 +107,7 @@ This version makes restart state explicit and portable:
 
 ```bash
 cd your-project
-curl -fsSL https://raw.githubusercontent.com/FX-991ES-Plus-C/cheap_ralph-wiggum-cursor/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/bbruneel/ralph-wiggum-cursor/main/install.sh | bash
 ```
 
 This creates:
@@ -170,7 +170,7 @@ Without gum, Ralph falls back to simple numbered prompts.
 The installer will offer to install `textual` automatically when `python3` is available. You can also install it manually:
 
 ```bash
-python3 -m pip install textual
+uv add textual
 ```
 
 ### 3. Define Your Task
