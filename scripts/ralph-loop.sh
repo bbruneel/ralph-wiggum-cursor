@@ -180,10 +180,10 @@ main() {
     fi
     [[ "$SKIP_MERGE" == "true" ]] && dashboard_args+=(--no-merge)
     dashboard_args+=("$WORKSPACE")
-    if ! check_dashboard_prerequisites "$SCRIPT_DIR"; then
+    if ! check_dashboard_prerequisites "$SCRIPT_DIR" "$WORKSPACE"; then
       exit 1
     fi
-    exec "$SCRIPT_DIR/ralph-tui.py" loop --workspace "$WORKSPACE" -- "${dashboard_args[@]}"
+    exec "${RALPH_DASHBOARD_PYTHON_BIN:-python3}" "$SCRIPT_DIR/ralph-tui.py" loop --workspace "$WORKSPACE" -- "${dashboard_args[@]}"
   fi
   
   local task_file="$WORKSPACE/RALPH_TASK.md"

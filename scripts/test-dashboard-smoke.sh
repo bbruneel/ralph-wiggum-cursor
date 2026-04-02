@@ -425,8 +425,18 @@ EOF
 
   "$workspace/worker.sh" &
   worker_pid=$!
-  sleep 0.2
-  child_pid="$(pgrep -P "$worker_pid" 2>/dev/null | awk 'NR==1 {print $1}')"
+  # Wait for the backgrounded sleep child to appear (avoid racing pgrep).
+  child_pid=""
+  local -a _kids
+  local _deadline=$((SECONDS + 3))
+  while [[ $SECONDS -lt $_deadline ]]; do
+    readarray -t _kids < <(pgrep -P "$worker_pid" 2>/dev/null || true)
+    if [[ ${#_kids[@]} -gt 0 ]]; then
+      child_pid="${_kids[0]}"
+      break
+    fi
+    sleep 0.05
+  done
 
   cat > "$workspace/.ralph/runtime.env" <<EOF
 # Ralph runtime state
@@ -451,9 +461,16 @@ EOF
     echo "Assertion failed: stop helper left worker process running" >&2
     exit 1
   fi
+  # Orphaned shell children can become zombies (still answer kill -0); only fail on live processes.
   if [[ -n "$child_pid" ]] && kill -0 "$child_pid" 2>/dev/null; then
-    echo "Assertion failed: stop helper left child process running" >&2
-    exit 1
+    if [[ -r "/proc/$child_pid/status" ]] && grep -q '^State:[[:space:]]*zombie' "/proc/$child_pid/status" 2>/dev/null; then
+      :
+    elif ps -o stat= -p "$child_pid" 2>/dev/null | grep -q 'Z'; then
+      :
+    else
+      echo "Assertion failed: stop helper left child process running" >&2
+      exit 1
+    fi
   fi
   wait "$worker_pid" 2>/dev/null || true
   if [[ -d "$lock_dir" ]]; then
@@ -678,9 +695,9 @@ EOF
   assert_contains "$workspace/.ralph/.last-session.env" "RALPH_SESSION_SHELL_EDIT_CALLS=1"
   assert_contains "$workspace/.ralph/.last-session.env" "RALPH_SESSION_SHELL_WORK_EDIT_CALLS=1"
   assert_contains "$workspace/.ralph/.last-session.env" "RALPH_SESSION_WORK_EDIT_CALLS=1"
-  assert_contains "$workspace/.ralph/activity.log" "SHELL-EDIT modified src/demo.ts"
-  assert_contains "$workspace/.ralph/activity.log" "SHELL MUTATION perl -0pi"
-  assert_contains "$workspace/.ralph/shell-edit-trace.tsv" "src/demo.ts"
+  assert_contains "$workspace/.ralph/activity.log" "SHELL-EDIT modified demo.ts"
+  assert_contains "$workspace/.ralph/activity.log" "SHELL MUTATION [redacted shell cmd,"
+  assert_contains "$workspace/.ralph/shell-edit-trace.tsv" "demo.ts"
 }
 
 run_navigation_brief_case() {
@@ -730,7 +747,7 @@ EOF
     | WARN_THRESHOLD=999999 ROTATE_THRESHOLD=999999 bash "$REPO_DIR/scripts/stream-parser.sh" "$workspace" >"$workspace/parser.out"
 
   assert_contains "$workspace/parser.out" "GUTTER"
-  assert_contains "$workspace/.ralph/read-trace.tsv" "src/monster.ts"
+  assert_contains "$workspace/.ralph/read-trace.tsv" "monster.ts"
   assert_contains "$workspace/.ralph/.last-session.env" "RALPH_SESSION_HOT_FILE=src/monster.ts"
   assert_contains "$workspace/.ralph/.last-session.env" "RALPH_SESSION_THRASH_PATH=src/monster.ts"
 

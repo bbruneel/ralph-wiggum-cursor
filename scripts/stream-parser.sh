@@ -235,6 +235,82 @@ estimate_shell_tokens() {
   echo $((payload + lines / 25 + 8))
 }
 
+# --- Redaction for .ralph/ activity, errors, signals, read-trace, shell-edit-trace ---
+# User-controlled segments (shell commands, raw stream lines, API errors) must not be
+# logged verbatim to shared log files.
+
+redact_freeform_text() {
+  local text="$1"
+  local n=${#text}
+  if [[ $n -eq 0 ]]; then
+    printf '%s' ""
+  else
+    printf '[REDACTED %d chars]' "$n"
+  fi
+}
+
+redact_shell_command() {
+  local cmd="$1"
+  local n=${#cmd}
+  printf '[redacted shell cmd, %d chars]' "$n"
+}
+
+# Redact a full line/message written to activity.log, errors.log, or signals.log detail.
+redact_log_message() {
+  local msg="$1"
+  local rest tail cmd
+
+  if [[ "$msg" == "AGENT RAW:"* ]]; then
+    rest="${msg#AGENT RAW: }"
+    printf 'AGENT RAW: %s' "$(redact_freeform_text "$rest")"
+  elif [[ "$msg" == "AGENT CONFIG:"* ]]; then
+    rest="${msg#AGENT CONFIG: }"
+    printf 'AGENT CONFIG: %s' "$(redact_freeform_text "$rest")"
+  elif [[ "$msg" == "API ERROR:"* ]]; then
+    rest="${msg#API ERROR: }"
+    printf 'API ERROR: %s' "$(redact_freeform_text "$rest")"
+  elif [[ "$msg" == "❌ API ERROR:"* ]]; then
+    rest="${msg#❌ API ERROR: }"
+    printf '❌ API ERROR: %s' "$(redact_freeform_text "$rest")"
+  elif [[ "$msg" == "SHELL FAIL:"* ]]; then
+    rest="${msg#SHELL FAIL: }"
+    tail="${rest#* → }"
+    if [[ "$tail" == "$rest" ]]; then
+      printf 'SHELL FAIL: %s' "$(redact_freeform_text "$rest")"
+    else
+      cmd="${rest%% → *}"
+      printf 'SHELL FAIL: %s → %s' "$(redact_shell_command "$cmd")" "$tail"
+    fi
+  elif [[ "$msg" == "SHELL MUTATION "* ]]; then
+    rest="${msg#SHELL MUTATION }"
+    tail="${rest#* → }"
+    if [[ "$tail" == "$rest" ]]; then
+      printf 'SHELL MUTATION %s' "$(redact_freeform_text "$rest")"
+    else
+      cmd="${rest%% → *}"
+      printf 'SHELL MUTATION %s → %s' "$(redact_shell_command "$cmd")" "$tail"
+    fi
+  elif [[ "$msg" == SHELL\ * ]]; then
+    rest="${msg#SHELL }"
+    tail="${rest#* → }"
+    if [[ "$tail" == "$rest" ]]; then
+      printf 'SHELL %s' "$(redact_freeform_text "$rest")"
+    else
+      cmd="${rest%% → *}"
+      printf 'SHELL %s → %s' "$(redact_shell_command "$cmd")" "$tail"
+    fi
+  else
+    printf '%s' "$msg"
+  fi
+}
+
+redact_path_for_trace() {
+  local path="$1"
+  local base
+  base=$(basename "$path" 2>/dev/null) || base="$path"
+  printf '%s' "$base"
+}
+
 TOKEN_EST_PROMPT=$(estimate_prompt_tokens "$PROMPT_CHARS")
 
 log_signal_event() {
@@ -244,6 +320,7 @@ log_signal_event() {
   timestamp=$(date '+%Y-%m-%d %H:%M:%S')
 
   if [[ -n "$detail" ]]; then
+    detail=$(redact_log_message "$detail")
     printf '[%s] source=parser iteration=%s signal=%s model=%s | %s\n' \
       "$timestamp" "${RALPH_ITERATION:-?}" "$signal" "${RALPH_MODEL_RUNTIME:-unknown}" "$detail" >> "$SIGNALS_LOG"
   else
@@ -309,6 +386,7 @@ emit_signal_once() {
 # Log to activity.log
 log_activity() {
   local message="$1"
+  message=$(redact_log_message "$message")
   local timestamp=$(date '+%H:%M:%S')
   local tokens=$(calc_tokens)
   local emoji=$(get_health_emoji $tokens)
@@ -319,6 +397,7 @@ log_activity() {
 # Log to errors.log
 log_error() {
   local message="$1"
+  message=$(redact_log_message "$message")
   local timestamp=$(date '+%H:%M:%S')
   
   echo "[$timestamp] $message" >> "$RALPH_DIR/errors.log"
@@ -659,14 +738,14 @@ append_shell_edit_trace() {
   local work_path_flag="$7"
   local safe_cmd
 
-  safe_cmd=$(sanitize_trace_field "$cmd")
+  safe_cmd=$(sanitize_trace_field "$(redact_shell_command "$cmd")")
 
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
     "${RALPH_ITERATION:-0}" \
     "$exit_code" \
     "$status" \
-    "$path" \
+    "$(sanitize_trace_field "$(redact_path_for_trace "$path")")" \
     "$before_bytes" \
     "$after_bytes" \
     "$work_path_flag" \
@@ -715,7 +794,7 @@ track_shell_edits() {
 
     track_file_write "$path"
     append_shell_edit_trace "$cmd" "$exit_code" "$status" "$path" "$before_bytes" "$after_bytes" "$work_flag"
-    log_activity "SHELL-EDIT $status $path (${before_bytes}B -> ${after_bytes}B)"
+    log_activity "SHELL-EDIT $status $(redact_path_for_trace "$path") (${before_bytes}B -> ${after_bytes}B)"
   done < "$tmp_diff"
 
   if [[ "$edit_count" -gt 0 ]]; then
@@ -808,7 +887,7 @@ track_file_read() {
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" \
     "${RALPH_ITERATION:-0}" \
-    "$path" \
+    "$(redact_path_for_trace "$path")" \
     "$bytes" \
     "$lines" \
     "$per_file_count" \
