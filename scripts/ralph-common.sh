@@ -173,6 +173,74 @@ require_auto_model() {
   return 0
 }
 
+# Decode KEY=VALUE right-hand side without executing shell (aligned with
+# ralph-tui.py decode_shell_value / shlex.split first token).
+_ralph_decode_env_rhs() {
+  local raw="$1"
+  local out
+  if command -v python3 &>/dev/null; then
+    out=$(printf '%s' "$raw" | python3 -c 'import shlex,sys; t=shlex.split(sys.stdin.read()); print(t[0] if t else "")' 2>/dev/null) || true
+    printf '%s' "$out"
+    return 0
+  fi
+  raw="${raw#"${raw%%[![:space:]]*}"}"
+  raw="${raw%"${raw##*[![:space:]]}"}"
+  if [[ "$raw" =~ ^\"(.*)\"$ ]]; then
+    printf '%s' "${BASH_REMATCH[1]}"
+    return 0
+  fi
+  if [[ "$raw" =~ ^\'(.*)\'$ ]]; then
+    printf '%s' "${BASH_REMATCH[1]//\'\'/\'}"
+    return 0
+  fi
+  printf '%s' "$raw"
+  return 0
+}
+
+_ralph_env_key_allowed_for_mode() {
+  local mode="$1"
+  local key="$2"
+  case "$mode" in
+    session)
+      case "$key" in
+        RALPH_SESSION_ITERATION|RALPH_SESSION_ID|RALPH_SESSION_REQUEST_ID|RALPH_SESSION_PERMISSION_MODE|RALPH_SESSION_MODEL|RALPH_SESSION_SIGNAL|RALPH_SESSION_TOKENS|RALPH_SESSION_BYTES_READ|RALPH_SESSION_BYTES_WRITTEN|RALPH_SESSION_ASSISTANT_CHARS|RALPH_SESSION_SHELL_OUTPUT_CHARS|RALPH_SESSION_TOOL_CALLS|RALPH_SESSION_READ_CALLS|RALPH_SESSION_WRITE_CALLS|RALPH_SESSION_WORK_WRITE_CALLS|RALPH_SESSION_SHELL_CALLS|RALPH_SESSION_SHELL_EDIT_CALLS|RALPH_SESSION_SHELL_WORK_EDIT_CALLS|RALPH_SESSION_WORK_EDIT_CALLS|RALPH_SESSION_LARGE_READS|RALPH_SESSION_LARGE_READ_REREADS|RALPH_SESSION_LARGE_READ_THRASH_HIT|RALPH_SESSION_HOT_FILE|RALPH_SESSION_HOT_FILE_READS|RALPH_SESSION_HOT_FILE_BYTES|RALPH_SESSION_HOT_FILE_LINES|RALPH_SESSION_THRASH_PATH|RALPH_SESSION_PROMPT_TOKENS|RALPH_SESSION_READ_TOKENS|RALPH_SESSION_WRITE_TOKENS|RALPH_SESSION_ASSISTANT_TOKENS|RALPH_SESSION_SHELL_TOKENS|RALPH_SESSION_TOOL_OVERHEAD_TOKENS)
+          return 0 ;;
+      esac
+      ;;
+    runtime)
+      case "$key" in
+        RALPH_RUNTIME_STATUS|RALPH_RUNTIME_ITERATION|RALPH_RUNTIME_MODEL|RALPH_RUNTIME_LAST_SIGNAL|RALPH_RUNTIME_LAST_EVENT|RALPH_RUNTIME_MODE|RALPH_RUNTIME_AGENT_PID|RALPH_RUNTIME_UPDATED_AT)
+          return 0 ;;
+      esac
+      ;;
+  esac
+  return 1
+}
+
+# Load workspace-controlled .ralph/*.env without sourcing (no arbitrary execution).
+_ralph_load_allowlisted_env_file() {
+  local file="$1"
+  local mode="$2"
+  local line key raw decoded
+  [[ -f "$file" ]] || return 0
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+    [[ -z "$line" ]] && continue
+    [[ "$line" =~ ^# ]] && continue
+    if [[ "$line" =~ ^export[[:space:]]+(.+)$ ]]; then
+      line="${BASH_REMATCH[1]}"
+    fi
+    [[ "$line" =~ ^([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]] || continue
+    key="${BASH_REMATCH[1]}"
+    raw="${BASH_REMATCH[2]}"
+    raw="${raw%$'\r'}"
+    _ralph_env_key_allowed_for_mode "$mode" "$key" || continue
+    decoded=$(_ralph_decode_env_rhs "$raw") || continue
+    printf -v "$key" '%s' "$decoded"
+  done < "$file"
+}
+
 # Read parser-produced session metrics into namespaced shell variables
 load_last_session_metrics() {
   local workspace="${1:-.}"
@@ -213,8 +281,7 @@ load_last_session_metrics() {
   RALPH_SESSION_TOOL_OVERHEAD_TOKENS=0
 
   if [[ -f "$summary_file" ]]; then
-    # shellcheck disable=SC1090
-    source "$summary_file"
+    _ralph_load_allowlisted_env_file "$summary_file" session
   fi
 }
 
@@ -386,8 +453,7 @@ stop_workspace_runtime() {
   local pid=""
 
   if [[ -f "$runtime_file" ]]; then
-    # shellcheck disable=SC1090
-    source "$runtime_file"
+    _ralph_load_allowlisted_env_file "$runtime_file" runtime
     runtime_status="${RALPH_RUNTIME_STATUS:-idle}"
     runtime_iteration="${RALPH_RUNTIME_ITERATION:-0}"
     runtime_model="${RALPH_RUNTIME_MODEL:-${MODEL:-unknown}}"
@@ -2927,7 +2993,15 @@ check_prerequisites() {
 # Check dashboard-specific prerequisites
 check_dashboard_prerequisites() {
   local script_dir="${1:-$(dirname "${BASH_SOURCE[0]}")}"
-  local python_bin="${PYTHON_BIN:-python3}"
+  local workspace_dir="${2:-}"
+  local python_bin
+
+  # Prefer project-local virtualenv for dashboard dependencies when available.
+  if [[ -n "$workspace_dir" ]] && [[ -x "$workspace_dir/.venv/bin/python" ]]; then
+    python_bin="$workspace_dir/.venv/bin/python"
+  else
+    python_bin="${PYTHON_BIN:-python3}"
+  fi
 
   if ! command -v "$python_bin" &> /dev/null; then
     echo "❌ --dashboard requires $python_bin"
@@ -2945,10 +3019,12 @@ import sys
 print(sys.executable)
 PY
 )"
-    echo "   Install via: uv add textual"
-    echo "               (fallback: $python_bin -m pip install textual)"
+    echo "   Install via: $python_bin -m pip install textual"
     return 1
   fi
+
+  # Reuse this exact interpreter when launching the dashboard process.
+  export RALPH_DASHBOARD_PYTHON_BIN="$python_bin"
 
   if [[ ! -f "$script_dir/ralph-tui.py" ]]; then
     echo "❌ Dashboard launcher not found: $script_dir/ralph-tui.py"

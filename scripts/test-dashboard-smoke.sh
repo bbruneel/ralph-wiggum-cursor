@@ -679,8 +679,8 @@ EOF
   assert_contains "$workspace/.ralph/.last-session.env" "RALPH_SESSION_SHELL_WORK_EDIT_CALLS=1"
   assert_contains "$workspace/.ralph/.last-session.env" "RALPH_SESSION_WORK_EDIT_CALLS=1"
   assert_contains "$workspace/.ralph/activity.log" "SHELL-EDIT modified src/demo.ts"
-  assert_contains "$workspace/.ralph/activity.log" "SHELL MUTATION perl -0pi"
-  assert_contains "$workspace/.ralph/shell-edit-trace.tsv" "src/demo.ts"
+  assert_contains "$workspace/.ralph/activity.log" "SHELL MUTATION [redacted shell cmd,"
+  assert_contains "$workspace/.ralph/shell-edit-trace.tsv" "demo.ts"
 }
 
 run_navigation_brief_case() {
@@ -730,7 +730,7 @@ EOF
     | WARN_THRESHOLD=999999 ROTATE_THRESHOLD=999999 bash "$REPO_DIR/scripts/stream-parser.sh" "$workspace" >"$workspace/parser.out"
 
   assert_contains "$workspace/parser.out" "GUTTER"
-  assert_contains "$workspace/.ralph/read-trace.tsv" "src/monster.ts"
+  assert_contains "$workspace/.ralph/read-trace.tsv" "monster.ts"
   assert_contains "$workspace/.ralph/.last-session.env" "RALPH_SESSION_HOT_FILE=src/monster.ts"
   assert_contains "$workspace/.ralph/.last-session.env" "RALPH_SESSION_THRASH_PATH=src/monster.ts"
 

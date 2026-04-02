@@ -1,3 +1,11 @@
+# Python (uv)
+.venv/
+
+# Python caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
 # Ralph state directories (generated at runtime)
 .ralph/
 .ralph-worktrees/

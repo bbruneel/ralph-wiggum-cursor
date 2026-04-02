@@ -22,6 +22,9 @@ MAX_PARALLEL="${MAX_PARALLEL:-3}"
 SKIP_MERGE="${SKIP_MERGE:-false}"
 CREATE_PR="${CREATE_PR:-false}"
 
+# RALPH_APPROVE_MCPS: set non-empty to pass --approve-mcps to cursor-agent (headless MCP auto-approval).
+# Default unset/empty: MCP auto-approval stays off.
+
 # =============================================================================
 # WORKTREE MANAGEMENT
 # =============================================================================
@@ -276,9 +279,14 @@ Begin by reading any relevant files, then implement the task."
   # Run cursor-agent
   echo "[$(date '+%H:%M:%S')] Agent ${display_agent_num} (job ${job_id}, task ${task_id}) starting: $task_desc" >> "$log_file"
   
-  # Headless mode: auto-approve MCP servers to avoid interactive prompts.
-  # Also detach stdin to prevent any accidental blocking on input.
-  if cd "$worktree_dir" && cursor-agent -p --approve-mcps --force --output-format stream-json --model "$MODEL" "$prompt" >> "$log_file" 2>&1 < /dev/null; then
+  # Headless MCP: --approve-mcps only when explicitly opted in (see RALPH_APPROVE_MCPS above).
+  # Detach stdin to prevent accidental blocking on input.
+  local -a cursor_agent_args=(-p)
+  if [[ -n "${RALPH_APPROVE_MCPS:-}" ]]; then
+    cursor_agent_args+=(--approve-mcps)
+  fi
+  cursor_agent_args+=(--force --output-format stream-json --model "$MODEL" "$prompt")
+  if cd "$worktree_dir" && cursor-agent "${cursor_agent_args[@]}" >> "$log_file" 2>&1 < /dev/null; then
     echo "done" > "$status_file"
     
     # Check if any commits were made
