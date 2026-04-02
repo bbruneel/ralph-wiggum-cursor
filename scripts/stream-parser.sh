@@ -794,7 +794,7 @@ track_shell_edits() {
 
     track_file_write "$path"
     append_shell_edit_trace "$cmd" "$exit_code" "$status" "$path" "$before_bytes" "$after_bytes" "$work_flag"
-    log_activity "SHELL-EDIT $status $path (${before_bytes}B -> ${after_bytes}B)"
+    log_activity "SHELL-EDIT $status $(redact_path_for_trace "$path") (${before_bytes}B -> ${after_bytes}B)"
   done < "$tmp_diff"
 
   if [[ "$edit_count" -gt 0 ]]; then
