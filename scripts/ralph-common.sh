@@ -3019,7 +3019,17 @@ import sys
 print(sys.executable)
 PY
 )"
-    echo "   Install via: $python_bin -m pip install textual"
+    echo "   Install via:"
+    if command -v uv &> /dev/null; then
+      if [[ -n "$workspace_dir" ]] && [[ -f "$workspace_dir/pyproject.toml" ]]; then
+        echo "     (cd \"$workspace_dir\" && uv add textual)"
+      else
+        echo "     uv pip install textual --python \"$python_bin\""
+      fi
+      echo "     Or: $python_bin -m pip install textual"
+    else
+      echo "     $python_bin -m pip install textual"
+    fi
     return 1
   fi
 
