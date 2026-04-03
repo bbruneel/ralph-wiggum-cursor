@@ -5,6 +5,7 @@
 set -euo pipefail
 
 REPO_RAW="${REPO_RAW:-https://raw.githubusercontent.com/FX-991ES-Plus-C/cheap_ralph-wiggum-cursor/main}"
+WORKSPACE_ROOT="$(pwd)"
 
 echo "═══════════════════════════════════════════════════════════════════"
 echo "🐛 Ralph Wiggum Installer"
@@ -73,45 +74,6 @@ gpgkey=https://repo.charm.sh/yum/gpg.key' | sudo tee /etc/yum.repos.d/charm.repo
   echo ""
 fi
 
-# Check for Textual and offer to install
-if command -v python3 &> /dev/null; then
-  if ! python3 - <<'PY' >/dev/null 2>&1
-import importlib.util
-raise SystemExit(0 if importlib.util.find_spec("textual") else 1)
-PY
-  then
-    echo "📦 Python package 'textual' not found (powers the FUN dashboard)"
-
-    SHOULD_INSTALL_TEXTUAL=""
-    if [[ "${INSTALL_TEXTUAL:-}" == "1" ]]; then
-      SHOULD_INSTALL_TEXTUAL="y"
-    elif [[ "${INSTALL_TEXTUAL:-}" == "0" ]]; then
-      SHOULD_INSTALL_TEXTUAL="n"
-    else
-      read -p "   Install textual with uv (fallback: pip)? [y/N] " -n 1 -r < /dev/tty
-      echo
-      SHOULD_INSTALL_TEXTUAL="$REPLY"
-    fi
-
-    if [[ "$SHOULD_INSTALL_TEXTUAL" =~ ^[Yy]$ ]]; then
-      if command -v uv &> /dev/null; then
-        if ! uv add textual; then
-          echo "   ⚠️  uv add failed; trying pip fallback..."
-          python3 -m pip install --user textual || echo "   ⚠️  Could not install textual automatically."
-        fi
-      else
-        python3 -m pip install --user textual || echo "   ⚠️  Could not install textual automatically."
-      fi
-    fi
-    echo ""
-  fi
-else
-  echo "⚠️  python3 not found. The Textual dashboard requires python3 + textual."
-  echo ""
-fi
-
-WORKSPACE_ROOT="$(pwd)"
-
 write_file_if_missing() {
   local path="$1"
 
@@ -163,6 +125,101 @@ done
 
 echo "✓ Scripts installed to .cursor/ralph-scripts/"
 
+# =============================================================================
+# RALPH DASHBOARD — nested uv project (does not touch the host pyproject.toml)
+# =============================================================================
+
+setup_ralph_dashboard_env() {
+  local dash_dir="$WORKSPACE_ROOT/.cursor/ralph-dashboard"
+  local pyproject="$dash_dir/pyproject.toml"
+  local lockfile="$dash_dir/uv.lock"
+  local venv_py="$dash_dir/.venv/bin/python"
+
+  mkdir -p "$dash_dir"
+
+  if ! curl -fsSL "$REPO_RAW/scripts/ralph-dashboard/pyproject.toml" -o "$pyproject" 2>/dev/null; then
+    echo "   ⚠️  Could not download scripts/ralph-dashboard/pyproject.toml (dashboard bootstrap skipped)"
+    return 1
+  fi
+  echo "✓ Installed $pyproject"
+
+  if ! curl -fsSL "$REPO_RAW/scripts/ralph-dashboard/uv.lock" -o "$lockfile" 2>/dev/null; then
+    echo "   ⚠️  Could not download scripts/ralph-dashboard/uv.lock"
+    return 1
+  fi
+  echo "✓ Installed $lockfile"
+
+  if curl -fsSL "$REPO_RAW/scripts/ralph-dashboard/README.md" -o "$dash_dir/README.md" 2>/dev/null; then
+    echo "✓ Installed $dash_dir/README.md"
+  fi
+
+  if [[ -x "$venv_py" ]] && "$venv_py" - <<'PY' 2>/dev/null; then
+import importlib.util
+raise SystemExit(0 if importlib.util.find_spec("textual") else 1)
+PY
+    echo "✓ Ralph dashboard venv already has Textual"
+    return 0
+  fi
+
+  if [[ "${INSTALL_TEXTUAL:-}" == "0" ]]; then
+    echo "Skipping dashboard venv (INSTALL_TEXTUAL=0). To run the dashboard later:"
+    echo "  cd .cursor/ralph-dashboard && uv sync"
+    return 0
+  fi
+
+  local SHOULD_INSTALL_TEXTUAL=""
+  if [[ "${INSTALL_TEXTUAL:-}" == "1" ]]; then
+    SHOULD_INSTALL_TEXTUAL="y"
+  elif [[ -r /dev/tty ]]; then
+    read -p "   Install Textual dashboard in isolated .cursor/ralph-dashboard (uv)? [Y/n] " -n 1 -r < /dev/tty
+    echo
+    if [[ -z "${REPLY:-}" ]] || [[ "$REPLY" =~ ^[Yy]$ ]]; then
+      SHOULD_INSTALL_TEXTUAL="y"
+    else
+      SHOULD_INSTALL_TEXTUAL="n"
+    fi
+  else
+    SHOULD_INSTALL_TEXTUAL="y"
+  fi
+
+  if [[ ! "$SHOULD_INSTALL_TEXTUAL" =~ ^[Yy]$ ]]; then
+    echo "Skipped. When ready: cd .cursor/ralph-dashboard && uv sync"
+    return 0
+  fi
+
+  if command -v uv &> /dev/null; then
+    echo "   Running uv sync in .cursor/ralph-dashboard ..."
+    if (cd "$dash_dir" && uv sync --no-dev); then
+      echo "✓ Ralph dashboard environment ready"
+    else
+      echo "   ⚠️  uv sync failed"
+      return 1
+    fi
+    return 0
+  fi
+
+  echo "   ⚠️  uv not found; install https://docs.astral.sh/uv/ then run:"
+  echo "      cd .cursor/ralph-dashboard && uv sync"
+  if command -v python3 &> /dev/null; then
+    echo "   Trying python3 -m venv + pip install textual (fallback)..."
+    python3 -m venv "$dash_dir/.venv"
+    if "$dash_dir/.venv/bin/pip" install -q textual; then
+      echo "✓ Dashboard venv created with pip (fallback)"
+    else
+      echo "   ⚠️  pip install textual failed"
+      return 1
+    fi
+  else
+    echo "   ⚠️  python3 not found; install Python 3.11+ or uv, then retry."
+    return 1
+  fi
+  return 0
+}
+
+echo ""
+echo "📦 Ralph dashboard (isolated Textual environment)..."
+setup_ralph_dashboard_env || true
+echo ""
 
 # =============================================================================
 # INITIALIZE .ralph/ STATE
