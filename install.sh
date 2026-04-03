@@ -1,10 +1,10 @@
 #!/bin/bash
 # Ralph Wiggum: One-click installer
-# Usage: curl -fsSL https://raw.githubusercontent.com/FX-991ES-Plus-C/cheap_ralph-wiggum-cursor/main/install.sh | bash
+# Usage: curl -fsSL https://raw.githubusercontent.com/bbruneel/ralph-wiggum-cursor/main/install.sh | bash
 
 set -euo pipefail
 
-REPO_RAW="${REPO_RAW:-https://raw.githubusercontent.com/FX-991ES-Plus-C/cheap_ralph-wiggum-cursor/main}"
+REPO_RAW="${REPO_RAW:-https://raw.githubusercontent.com/bbruneel/ralph-wiggum-cursor/main}"
 WORKSPACE_ROOT="$(pwd)"
 
 echo "═══════════════════════════════════════════════════════════════════"
