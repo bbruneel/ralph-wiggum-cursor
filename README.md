@@ -126,6 +126,7 @@ your-project/
 │   │   ├── task-parser.sh          # YAML-backed task parsing
 │   │   └── init-ralph.sh           # Re-initialize if needed
 │   └── ralph-dashboard/          # Nested uv project for Textual (does not touch your app’s pyproject)
+│       ├── README.md             # `uv sync` / `uv lock --upgrade` notes
 │       ├── pyproject.toml
 │       └── uv.lock               # `uv sync` here creates `.venv/` with textual
 ├── .ralph/                     # State files (tracked in git)
@@ -175,6 +176,12 @@ The installer downloads `pyproject.toml` and `uv.lock` into `.cursor/ralph-dashb
 
 ```bash
 cd .cursor/ralph-dashboard && uv sync
+```
+
+The committed `uv.lock` shipped with Ralph pins Textual for reproducible installs. If you prefer to **float** to the newest versions allowed by `pyproject.toml`, regenerate the lock and sync:
+
+```bash
+cd .cursor/ralph-dashboard && uv lock --upgrade && uv sync
 ```
 
 If `uv` is unavailable, the installer may fall back to `python3 -m venv` plus `pip install textual` in the same directory.

@@ -149,6 +149,10 @@ setup_ralph_dashboard_env() {
   fi
   echo "✓ Installed $lockfile"
 
+  if curl -fsSL "$REPO_RAW/scripts/ralph-dashboard/README.md" -o "$dash_dir/README.md" 2>/dev/null; then
+    echo "✓ Installed $dash_dir/README.md"
+  fi
+
   if [[ -x "$venv_py" ]] && "$venv_py" - <<'PY' 2>/dev/null; then
 import importlib.util
 raise SystemExit(0 if importlib.util.find_spec("textual") else 1)
