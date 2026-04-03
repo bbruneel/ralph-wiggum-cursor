@@ -99,7 +99,7 @@ This version makes restart state explicit and portable:
 | **Git repo** | `git status` works | `git init` |
 | **cursor-agent CLI** | `which cursor-agent` | `curl https://cursor.com/install -fsS \| bash` |
 | **gum** (optional) | `which gum` | Installer offers to install, or `brew install gum` |
-| **python3 + textual** (dashboard only) | `python3 -c "import textual"` | Installer offers to install, or `uv add textual` |
+| **python3 + uv** (dashboard only) | `uv --version` | Installer downloads `.cursor/ralph-dashboard/` (nested `pyproject.toml` + lockfile) and runs `uv sync` there so your project’s own `pyproject.toml` is untouched |
 
 ## Quick Start
 
@@ -113,17 +113,21 @@ curl -fsSL https://raw.githubusercontent.com/bbruneel/ralph-wiggum-cursor/main/i
 This creates:
 ```
 your-project/
-├── .cursor/ralph-scripts/      # Ralph scripts
-│   ├── ralph-setup.sh          # Main entry point (interactive)
-│   ├── ralph-loop.sh           # CLI mode (for scripting)
-│   ├── ralph-once.sh           # Single iteration (testing)
-│   ├── ralph-tui.py            # Textual live dashboard / monitor
-│   ├── ralph-parallel.sh       # Parallel execution with worktrees
-│   ├── stream-parser.sh        # Token tracking + error detection
-│   ├── ralph-common.sh         # Shared functions
-│   ├── ralph-retry.sh          # Exponential backoff retry logic
-│   ├── task-parser.sh          # YAML-backed task parsing
-│   └── init-ralph.sh           # Re-initialize if needed
+├── .cursor/
+│   ├── ralph-scripts/          # Ralph scripts
+│   │   ├── ralph-setup.sh          # Main entry point (interactive)
+│   │   ├── ralph-loop.sh           # CLI mode (for scripting)
+│   │   ├── ralph-once.sh           # Single iteration (testing)
+│   │   ├── ralph-tui.py            # Textual live dashboard / monitor
+│   │   ├── ralph-parallel.sh       # Parallel execution with worktrees
+│   │   ├── stream-parser.sh        # Token tracking + error detection
+│   │   ├── ralph-common.sh         # Shared functions
+│   │   ├── ralph-retry.sh          # Exponential backoff retry logic
+│   │   ├── task-parser.sh          # YAML-backed task parsing
+│   │   └── init-ralph.sh           # Re-initialize if needed
+│   └── ralph-dashboard/          # Nested uv project for Textual (does not touch your app’s pyproject)
+│       ├── pyproject.toml
+│       └── uv.lock               # `uv sync` here creates `.venv/` with textual
 ├── .ralph/                     # State files (tracked in git)
 │   ├── session-brief.md        # Auto-generated restart brief (agent reads first)
 │   ├── progress.md             # Agent updates: what's done
@@ -167,11 +171,13 @@ Without gum, Ralph falls back to simple numbered prompts.
 
 ### 2b. (Optional) Textual for the Dashboard
 
-The installer will offer to install `textual` automatically when `python3` is available. You can also install it manually:
+The installer downloads `pyproject.toml` and `uv.lock` into `.cursor/ralph-dashboard/` and offers to run **`uv sync`** there. That creates an isolated virtualenv with Textual and does **not** modify your project’s root `pyproject.toml`. To install or refresh the dashboard environment manually:
 
 ```bash
-uv add textual
+cd .cursor/ralph-dashboard && uv sync
 ```
+
+If `uv` is unavailable, the installer may fall back to `python3 -m venv` plus `pip install textual` in the same directory.
 
 ### 3. Define Your Task
 
@@ -225,7 +231,13 @@ Ralph will:
 ./.cursor/ralph-scripts/ralph-loop.sh --dashboard -y
 ```
 
-The dashboard launcher picks a Python that has Textual installed: it prefers **`workspace/.venv/bin/python`** when that path exists and is executable; otherwise it uses **`PYTHON_BIN`** if set, or **`python3`**. The chosen interpreter is exported as **`RALPH_DASHBOARD_PYTHON_BIN`** and used to run `ralph-tui.py` (you can set `RALPH_DASHBOARD_PYTHON_BIN` yourself before launch if you need an explicit override).
+The dashboard launcher picks a Python that has Textual installed. Resolution order:
+
+1. **`workspace/.cursor/ralph-dashboard/.venv/bin/python`** when that path exists and is executable (the nested uv project from the installer).
+2. Else **`workspace/.venv/bin/python`** if present (legacy / manual setups).
+3. Else **`PYTHON_BIN`** if set, or **`python3`**.
+
+The chosen interpreter is exported as **`RALPH_DASHBOARD_PYTHON_BIN`** and used to run `ralph-tui.py`. Set **`RALPH_DASHBOARD_PYTHON_BIN`** yourself before launch if you need to force a specific interpreter.
 
 This opens the Textual dashboard with:
 - a dense cockpit header tuned for wide laptop terminals
@@ -660,7 +672,7 @@ RALPH_MODEL=auto MAX_ITERATIONS=50 ./ralph-loop.sh
 | Variable | Where | Default | Meaning |
 |----------|-------|---------|---------|
 | **`RALPH_APPROVE_MCPS`** | Parallel agents (`ralph-parallel.sh`, used by `ralph-loop.sh --parallel`) | *(unset)* | If set to any **non-empty** value, each parallel job runs `cursor-agent` with **`--approve-mcps`** (headless auto-approval of MCP servers). If **unset**, that flag is **not** passed. |
-| **`PYTHON_BIN`** | Dashboard prerequisite check (`ralph-loop.sh --dashboard`) | `python3` | Which interpreter to check for the `textual` package. **Ignored** when `workspace/.venv/bin/python` exists and is executable—then that venv Python is used instead. |
+| **`PYTHON_BIN`** | Dashboard prerequisite check (`ralph-loop.sh --dashboard`) | `python3` | Which interpreter to check for the `textual` package when the nested dashboard venv and `workspace/.venv` are absent. **Ignored** when `workspace/.cursor/ralph-dashboard/.venv/bin/python` or `workspace/.venv/bin/python` exists and is executable. |
 | **`RALPH_DASHBOARD_PYTHON_BIN`** | Dashboard process (`ralph-loop.sh --dashboard`) | *(set by scripts)* | Normally **exported** by `check_dashboard_prerequisites` to the same Python that passed the Textual check; the loop uses it to **`exec`** `ralph-tui.py`. Set it yourself before launch only if you need to **force** a specific interpreter. |
 
 Other knobs (model, iterations, parser thresholds) still follow the flags and `ralph-common.sh` defaults below.

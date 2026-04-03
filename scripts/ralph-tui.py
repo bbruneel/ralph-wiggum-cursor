@@ -1326,7 +1326,7 @@ def normalize_args(args: argparse.Namespace) -> tuple[str, Path, list[str]]:
     return mode, Path(workspace or ".").resolve(), list(args.child_args)
 
 
-def require_textual() -> None:
+def require_textual(workspace: Path | None = None) -> None:
     python_bin = os.environ.get("PYTHON_BIN", sys.executable)
     try:
         __import__("textual")
@@ -1334,10 +1334,12 @@ def require_textual() -> None:
         print("❌ The Ralph dashboard now uses Python + Textual.", file=sys.stderr)
         print("", file=sys.stderr)
         print("Install the dependency with:", file=sys.stderr)
-        cwd = Path.cwd()
+        dash_dir = None
+        if workspace is not None:
+            dash_dir = workspace / ".cursor" / "ralph-dashboard"
         uv_path = shutil.which("uv")
-        if uv_path and (cwd / "pyproject.toml").is_file():
-            print(f"  (cd {shlex.quote(str(cwd))} && uv add textual)", file=sys.stderr)
+        if dash_dir is not None and (dash_dir / "pyproject.toml").is_file():
+            print(f"  (cd {shlex.quote(str(dash_dir))} && uv sync)", file=sys.stderr)
         elif uv_path:
             print(
                 f"  uv pip install textual --python {shlex.quote(python_bin)}",
@@ -1345,7 +1347,7 @@ def require_textual() -> None:
             )
         else:
             print(f"  {python_bin} -m pip install textual", file=sys.stderr)
-        if uv_path:
+        if uv_path and dash_dir is None:
             print(f"  Or: {python_bin} -m pip install textual", file=sys.stderr)
         print("", file=sys.stderr)
         print("Then rerun Ralph with --dashboard.", file=sys.stderr)
@@ -1353,7 +1355,7 @@ def require_textual() -> None:
 
 
 def launch_textual_dashboard(workspace: Path, mode: str, child_args: list[str]) -> int:
-    require_textual()
+    require_textual(workspace)
 
     from rich.console import Group
     from rich.panel import Panel

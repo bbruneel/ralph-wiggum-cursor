@@ -2995,9 +2995,16 @@ check_dashboard_prerequisites() {
   local script_dir="${1:-$(dirname "${BASH_SOURCE[0]}")}"
   local workspace_dir="${2:-}"
   local python_bin
+  local dash_venv_py=""
 
-  # Prefer project-local virtualenv for dashboard dependencies when available.
-  if [[ -n "$workspace_dir" ]] && [[ -x "$workspace_dir/.venv/bin/python" ]]; then
+  # Prefer nested Ralph dashboard env (uv project under .cursor/; never the host project's .venv).
+  if [[ -n "$workspace_dir" ]]; then
+    dash_venv_py="$workspace_dir/.cursor/ralph-dashboard/.venv/bin/python"
+  fi
+
+  if [[ -n "$dash_venv_py" ]] && [[ -x "$dash_venv_py" ]]; then
+    python_bin="$dash_venv_py"
+  elif [[ -n "$workspace_dir" ]] && [[ -x "$workspace_dir/.venv/bin/python" ]]; then
     python_bin="$workspace_dir/.venv/bin/python"
   else
     python_bin="${PYTHON_BIN:-python3}"
@@ -3020,12 +3027,10 @@ print(sys.executable)
 PY
 )"
     echo "   Install via:"
-    if command -v uv &> /dev/null; then
-      if [[ -n "$workspace_dir" ]] && [[ -f "$workspace_dir/pyproject.toml" ]]; then
-        echo "     (cd \"$workspace_dir\" && uv add textual)"
-      else
-        echo "     uv pip install textual --python \"$python_bin\""
-      fi
+    if [[ -n "$workspace_dir" ]] && [[ -f "$workspace_dir/.cursor/ralph-dashboard/pyproject.toml" ]]; then
+      echo "     (cd \"$workspace_dir/.cursor/ralph-dashboard\" && uv sync)"
+    elif command -v uv &> /dev/null; then
+      echo "     uv pip install textual --python \"$python_bin\""
       echo "     Or: $python_bin -m pip install textual"
     else
       echo "     $python_bin -m pip install textual"

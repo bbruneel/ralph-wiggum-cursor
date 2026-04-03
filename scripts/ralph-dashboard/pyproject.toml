@@ -1,0 +1,8 @@
+[project]
+name = "ralph-dashboard"
+version = "0.1.0"
+description = "Isolated Textual dashboard for Ralph Wiggum (installed under .cursor/; does not use the host project's Python dependencies)."
+requires-python = ">=3.11"
+dependencies = [
+    "textual>=0.47.0",
+]
